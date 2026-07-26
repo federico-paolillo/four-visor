@@ -1,0 +1,37 @@
+version: "2"
+run:
+  timeout: 2m
+  tests: false
+  go: "1.26"
+  concurrency: 4
+linters:
+  default: all
+  disable:
+    - gomodguard
+    - depguard
+    - err113
+    - gochecknoglobals
+    - godox
+    - mnd
+    - varnamelen
+    - exhaustruct
+    - wsl
+  settings:
+    funlen:
+      lines: 70
+    revive:
+      rules:
+        - name: var-naming
+          arguments:
+            - ["ID"]
+    staticcheck:
+      initialisms: ["Id"]
+output:
+  show-stats: false
+  formats:
+    text:
+      print-linter-name: true
+      print-issued-lines: true
+      colors: true
+issues:
+  uniq-by-line: false

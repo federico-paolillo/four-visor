@@ -1,0 +1,36 @@
+[tools]
+go = "1.26"
+node = "26"
+golangci-lint = "2.12"
+
+[settings]
+color = true
+
+[tasks."be:lint"]
+dir = "backend/"
+run = "golangci-lint run"
+
+[tasks."be:build"]
+dir = "backend/"
+run = "go build -v ./..."
+
+[tasks."be:test"]
+dir = "backend/"
+run = "go test -race -shuffle=on ./..."
+env = { CGO_ENABLED = 1 }
+
+[tasks."fe:lint"]
+dir = "frontend/"
+run = "npm run lint"
+
+[tasks."fe:typecheck"]
+dir = "frontend/"
+run = "npm run typecheck"
+
+[tasks."fe:build"]
+dir = "frontend/"
+run = "npm run build"
+
+[tasks."fe:test"]
+dir = "frontend/"
+run = "npm run test"

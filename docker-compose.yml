@@ -1,0 +1,33 @@
+name: four-visor
+services:
+  otelcol:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.157.0
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+  memcached:
+    image: memcached:1.6.45-alpine
+    restart: unless-stopped
+    command: ["memcached", "--port=65100", "--memory-limit=64"]
+    networks:
+      - cache
+  frontend:
+    build:
+      context: frontend/
+      dockerfile: Dockerfile
+  backend:
+    build:
+      context: backend/
+      dockerfile: Dockerfile
+    networks:
+      - default
+      - cache
+  edge:
+    image: caddy:2.11.3
+    ports:
+      - 127.0.0.1:65199:65199
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+
+networks:
+  cache:
+    internal: true

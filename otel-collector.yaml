@@ -1,0 +1,43 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:65103
+      http:
+        endpoint: 0.0.0.0:65104
+
+processors:
+  tail_sampling:
+    decision_wait: 15m
+    policies:
+      - name: retain-errors
+        type: status_code
+        status_code:
+          status_codes: [ERROR]
+      - name: sample-successes
+        type: probabilistic
+        probabilistic:
+          sampling_percentage: 10
+
+exporters:
+  otlp_grpc:
+    endpoint: ${env:FOURVISOR_OTLP_EXPORT_ENDPOINT} # Provided by operator at deployment time
+    tls:
+      insecure: true
+
+service:
+  telemetry:
+    metrics:
+      level: none
+      readers: []
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [tail_sampling]
+      exporters: [otlp_grpc]
+    metrics:
+      receivers: [otlp]
+      exporters: [otlp_grpc]
+    logs:
+      receivers: [otlp]
+      exporters: [otlp_grpc]
