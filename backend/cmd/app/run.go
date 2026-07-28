@@ -15,6 +15,7 @@ import (
 
 	"git.disroot.org/federico-paolillo/four-visor.git/config"
 	"git.disroot.org/federico-paolillo/four-visor.git/health"
+	"git.disroot.org/federico-paolillo/four-visor.git/lineage"
 	"git.disroot.org/federico-paolillo/four-visor.git/telemetry"
 	"go.opentelemetry.io/otel"
 )
@@ -41,7 +42,7 @@ func (err *applicationError) Unwrap() error {
 	return err.cause
 }
 
-// run composes the health service and owns its bounded server lifecycle.
+// run composes the backend HTTP service and owns its bounded server lifecycle.
 func run(parent context.Context, stderr io.Writer) error {
 	cfg, err := config.Load()
 	if err != nil {
@@ -54,21 +55,9 @@ func run(parent context.Context, stderr io.Writer) error {
 	}
 	defer shutdownTelemetry(context.WithoutCancel(parent), providers)
 
-	cache := health.NewMemcached(cfg.MemcachedAddress)
-	dns := health.NewDNS(cfg.DNSName, net.DefaultResolver)
-	healthHandler := health.NewHandler(
-		cfg.HealthTimeout,
-		providers.Slog,
-		providers.Tracer.Tracer("four-visor/health"),
-		cache,
-		dns,
-	)
-	mux := http.NewServeMux()
-	mux.Handle("/health", healthHandler)
-
-	handler, err := telemetry.HTTPHandler(mux, providers.Tracer, providers.Meter, otel.GetTextMapPropagator())
+	handler, err := applicationHandler(cfg, providers)
 	if err != nil {
-		return &applicationError{operation: "creating HTTP instrumentation", cause: err}
+		return &applicationError{operation: "creating HTTP handler", cause: err}
 	}
 
 	server := &http.Server{
@@ -109,6 +98,39 @@ func run(parent context.Context, stderr io.Writer) error {
 	}
 
 	return nil
+}
+
+func applicationHandler(cfg config.Config, providers *telemetry.Providers) (http.Handler, error) {
+	cache := health.NewMemcached(cfg.MemcachedAddress)
+	dns := health.NewDNS(cfg.DNSName, net.DefaultResolver)
+	healthHandler := health.NewHandler(
+		cfg.HealthTimeout,
+		providers.Slog,
+		providers.Tracer.Tracer("four-visor/health"),
+		cache,
+		dns,
+	)
+
+	snapshotHandler, err := lineage.NewSnapshotHandler(
+		cfg.MemcachedAddress,
+		providers.Slog,
+		providers.Tracer.Tracer("four-visor/lineage"),
+		providers.Meter.Meter("four-visor/lineage"),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating snapshot handler: %w", err)
+	}
+
+	mux := http.NewServeMux()
+	mux.Handle("/health", healthHandler)
+	mux.Handle("/snapshot", snapshotHandler)
+
+	handler, err := telemetry.HTTPHandler(mux, providers.Tracer, providers.Meter, otel.GetTextMapPropagator())
+	if err != nil {
+		return nil, fmt.Errorf("instrumenting HTTP handler: %w", err)
+	}
+
+	return handler, nil
 }
 
 func shutdownTelemetry(parent context.Context, providers *telemetry.Providers) {

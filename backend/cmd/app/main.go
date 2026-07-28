@@ -1,4 +1,4 @@
-// Package main wires the configured 4Visor backend health service.
+// Package main wires the configured 4Visor backend HTTP service.
 package main
 
 import (

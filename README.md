@@ -35,14 +35,32 @@ prepared personally by me.
 The backend and frontend enforce the same fixture-backed
 [snapshot version 1 contract](docs/snapshot-v1-contract.md).
 
-### Backend health service
+### Backend HTTP service
 
-The backend currently serves only `GET /health`. It returns `200 OK` when
+The backend serves internal `GET /health` and `GET /snapshot`; the edge maps
+browser requests from `/api/health` and `/api/snapshot` to those routes.
+
+`GET /health` returns `200 OK` when
 Memcached answers a protocol query and `a.4cdn.org` resolves, otherwise it
 returns `503 Service Unavailable` within the configured health timeout. Response
 bodies are deliberately non-contractual and never contain dependency details.
 Unsupported methods return `405`, undeclared routes return `404`, and there is
 no readiness endpoint.
+
+`GET /snapshot` pins the active Memcached lineage, reads its strict completion
+metadata and every ordered block, then validates the reassembled schema-version-1
+document before committing `200 OK`. The handler returns the stored serialized
+bytes unchanged with `Content-Type: application/json`, an exact `Content-Length`,
+and `Cache-Control: no-store`. A missing active pointer, completion entry, or
+referenced block returns `410 Gone`; unavailable Memcached operations return
+`503`, while present but invalid cache data returns `500`. Every matched snapshot
+response is non-cacheable and generic failures disclose no cache keys, payloads,
+addresses, or raw dependency errors.
+
+The Go service does not implement Brotli, ranges, manifests, public block
+transfer, or per-resource routes. VPS ingress alone owns normal Brotli HTTP
+content encoding. Request cancellation stops further cache reads and validation;
+one in-flight gomemcache operation remains bounded by its 500 ms socket timeout.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |

@@ -87,6 +87,33 @@ func TestReassemblyRejectsIncompleteBlocks(t *testing.T) {
 	}
 }
 
+func TestAppendBlockValidatesEachOrderedShape(t *testing.T) {
+	metadata := completion{BlockCount: 2, ByteLength: blockSize + 3}
+	data, err := appendBlock(nil, metadata, 0, make([]byte, blockSize))
+	if err != nil || len(data) != blockSize {
+		t.Fatalf("appendBlock(first) length=%d error=%v", len(data), err)
+	}
+
+	data, err = appendBlock(data, metadata, 1, []byte("end"))
+	if err != nil || len(data) != metadata.ByteLength {
+		t.Fatalf("appendBlock(last) length=%d error=%v", len(data), err)
+	}
+
+	for _, test := range []struct {
+		index int
+		block []byte
+	}{
+		{index: -1, block: nil},
+		{index: 2, block: nil},
+		{index: 0, block: make([]byte, blockSize-1)},
+		{index: 1, block: []byte("no")},
+	} {
+		if _, err := appendBlock(nil, metadata, test.index, test.block); !errors.Is(err, errInvalidCompletion) {
+			t.Fatalf("appendBlock(index=%d length=%d) error=%v", test.index, len(test.block), err)
+		}
+	}
+}
+
 func TestEvictionKeysDeleteCompletionBeforeOrderedBlocks(t *testing.T) {
 	const lineageID = "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z"
 	metadata := completion{BlockCount: 3, ByteLength: 2*blockSize + 1}

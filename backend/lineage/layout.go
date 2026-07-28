@@ -117,19 +117,35 @@ func reassemble(metadata completion, blocks [][]byte) ([]byte, error) {
 	data := make([]byte, 0, metadata.ByteLength)
 
 	for index, block := range blocks {
-		want := blockSize
-		if index == metadata.BlockCount-1 {
-			want = metadata.ByteLength - index*blockSize
+		data, err = appendBlock(data, metadata, index, block)
+		if err != nil {
+			return nil, err
 		}
-
-		if len(block) != want {
-			return nil, fmt.Errorf("%w: block length mismatch", errInvalidCompletion)
-		}
-
-		data = append(data, block...)
 	}
 
 	return data, nil
+}
+
+func appendBlock(data []byte, metadata completion, index int, block []byte) ([]byte, error) {
+	err := validateCompletion(metadata)
+	if err != nil {
+		return nil, err
+	}
+
+	if index < 0 || index >= metadata.BlockCount {
+		return nil, fmt.Errorf("%w: block index out of range", errInvalidCompletion)
+	}
+
+	want := blockSize
+	if index == metadata.BlockCount-1 {
+		want = metadata.ByteLength - index*blockSize
+	}
+
+	if len(block) != want {
+		return nil, fmt.Errorf("%w: block length mismatch", errInvalidCompletion)
+	}
+
+	return append(data, block...), nil
 }
 
 func completionKey(lineageID string) string {
