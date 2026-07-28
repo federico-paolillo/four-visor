@@ -13,10 +13,9 @@ import (
 )
 
 const (
-	maximumCatalogThreads = 250
-	maximumThreadPosts    = 250
-	stateField            = "state"
-	ulidAlphabet          = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	maximumThreadPosts = 250
+	stateField         = "state"
+	ulidAlphabet       = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 )
 
 var (
@@ -281,7 +280,7 @@ func validateCatalogPages(object map[string]json.RawMessage, path string) error 
 
 		threadCount += count
 
-		if threadCount > maximumCatalogThreads {
+		if threadCount > MaximumCatalogThreads {
 			return contractError(path+".pages", "must contain at most 250 threads", nil)
 		}
 	}

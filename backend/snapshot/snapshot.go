@@ -6,6 +6,8 @@ import "encoding/json"
 const (
 	// Version is the only snapshot schema version accepted by 4Visor.
 	Version = 1
+	// MaximumCatalogThreads is the version 1 catalog cardinality limit.
+	MaximumCatalogThreads = 250
 
 	// StateFailed marks a known resource whose acquisition failed.
 	StateFailed State = "failed"

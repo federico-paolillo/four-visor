@@ -12,7 +12,7 @@ import (
 
 func TestLoadDefaults(t *testing.T) {
 	clearEnvironment(t)
-	t.Setenv(memcachedAddressKey, "memcached:65100")
+	setRequiredEnvironment(t)
 
 	got, err := Load()
 	if err != nil {
@@ -25,6 +25,14 @@ func TestLoadDefaults(t *testing.T) {
 		MemcachedAddress: "memcached:65100",
 		DNSName:          defaultDNSName,
 		OTLPEndpoint:     defaultOTLPEndpoint,
+		Acquisition: Acquisition{
+			RateInterval:   defaultRateInterval,
+			MaxConcurrency: defaultConcurrency,
+			RequestTimeout: defaultRequestTimeout,
+			MaxRetries:     defaultMaxRetries,
+			RetryBackoff:   defaultRetryBackoff,
+			UserAgent:      "4Visor/0123456789abcdef0123456789abcdef01234567",
+		},
 	}
 	if got != want {
 		t.Fatalf("Load() = %#v, want %#v", got, want)
@@ -33,11 +41,17 @@ func TestLoadDefaults(t *testing.T) {
 
 func TestLoadOverrides(t *testing.T) {
 	clearEnvironment(t)
+	setRequiredEnvironment(t)
 	t.Setenv(serverAddressKey, "127.0.0.1:65120")
 	t.Setenv(healthTimeoutKey, "750ms")
 	t.Setenv(memcachedAddressKey, "cache.internal:65121")
 	t.Setenv(dnsNameKey, "boards.4chan.org")
 	t.Setenv(otlpEndpointKey, "https://collector.example:4317")
+	t.Setenv(rateIntervalKey, "2s")
+	t.Setenv(maxConcurrencyKey, "4")
+	t.Setenv(requestTimeoutKey, "3s")
+	t.Setenv(maxRetriesKey, "1")
+	t.Setenv(retryBackoffKey, "500ms")
 
 	got, err := Load()
 	if err != nil {
@@ -47,6 +61,12 @@ func TestLoadOverrides(t *testing.T) {
 		got.MemcachedAddress != "cache.internal:65121" || got.DNSName != "boards.4chan.org" ||
 		got.OTLPEndpoint != "https://collector.example:4317" {
 		t.Fatalf("Load() returned unexpected overrides: %#v", got)
+	}
+	if got.Acquisition.RateInterval != 2*time.Second || got.Acquisition.MaxConcurrency != 4 ||
+		got.Acquisition.RequestTimeout != 3*time.Second || got.Acquisition.MaxRetries != 1 ||
+		got.Acquisition.RetryBackoff != 500*time.Millisecond ||
+		got.Acquisition.UserAgent != "4Visor/0123456789abcdef0123456789abcdef01234567" {
+		t.Fatalf("Load() returned unexpected acquisition overrides: %#v", got.Acquisition)
 	}
 }
 
@@ -67,13 +87,32 @@ func TestLoadValidation(t *testing.T) {
 		{name: "OTLP fragment", key: otlpEndpointKey, value: "https://collector.example:4317#secret"},
 		{name: "OTLP zero port", key: otlpEndpointKey, value: "https://collector.example:0"},
 		{name: "OTLP port above range", key: otlpEndpointKey, value: "https://collector.example:65536"},
+		{name: "rate below official limit", key: rateIntervalKey, value: "999ms"},
+		{name: "zero concurrency", key: maxConcurrencyKey, value: "0"},
+		{name: "concurrency above maximum", key: maxConcurrencyKey, value: "11"},
+		{name: "invalid request timeout", key: requestTimeoutKey, value: "later"},
+		{name: "negative retries", key: maxRetriesKey, value: "-1"},
+		{name: "retries above maximum", key: maxRetriesKey, value: "3"},
+		{name: "zero retry backoff", key: retryBackoffKey, value: "0s"},
+		{name: "missing commit hash", key: commitHashKey},
+		{name: "short commit hash", key: commitHashKey, value: "0123456"},
+		{name: "uppercase commit hash", key: commitHashKey, value: "0123456789ABCDEF0123456789ABCDEF01234567"},
+		{name: "non-hex commit hash", key: commitHashKey, value: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			clearEnvironment(t)
-			if test.key != memcachedAddressKey || test.value != "" {
-				t.Setenv(memcachedAddressKey, "memcached:65100")
+			setRequiredEnvironment(t)
+			if test.key == memcachedAddressKey && test.value == "" {
+				if err := os.Unsetenv(memcachedAddressKey); err != nil {
+					t.Fatalf("os.Unsetenv(%q): %v", memcachedAddressKey, err)
+				}
+			}
+			if test.key == commitHashKey && test.value == "" {
+				if err := os.Unsetenv(commitHashKey); err != nil {
+					t.Fatalf("os.Unsetenv(%q): %v", commitHashKey, err)
+				}
 			}
 			if test.value != "" {
 				t.Setenv(test.key, test.value)
@@ -101,7 +140,7 @@ func TestOTLPEndpointDiagnosticRedactsValueAndPreservesCause(t *testing.T) {
 	for _, endpoint := range tests {
 		t.Run(endpoint, func(t *testing.T) {
 			clearEnvironment(t)
-			t.Setenv(memcachedAddressKey, "memcached:65100")
+			setRequiredEnvironment(t)
 			t.Setenv(otlpEndpointKey, endpoint)
 
 			_, err := Load()
@@ -120,7 +159,7 @@ func TestOTLPEndpointDiagnosticRedactsValueAndPreservesCause(t *testing.T) {
 
 func TestLoadDiagnosticRedactsValueAndPreservesCause(t *testing.T) {
 	clearEnvironment(t)
-	t.Setenv(memcachedAddressKey, "memcached:65100")
+	setRequiredEnvironment(t)
 	const secret = "credential-do-not-log"
 	t.Setenv(healthTimeoutKey, secret)
 
@@ -151,6 +190,12 @@ func clearEnvironment(t *testing.T) {
 		memcachedAddressKey,
 		dnsNameKey,
 		otlpEndpointKey,
+		rateIntervalKey,
+		maxConcurrencyKey,
+		requestTimeoutKey,
+		maxRetriesKey,
+		retryBackoffKey,
+		commitHashKey,
 	} {
 		value, exists := os.LookupEnv(key)
 		if err := os.Unsetenv(key); err != nil {
@@ -164,4 +209,10 @@ func clearEnvironment(t *testing.T) {
 			}
 		})
 	}
+}
+
+func setRequiredEnvironment(t *testing.T) {
+	t.Helper()
+	t.Setenv(memcachedAddressKey, "memcached:65100")
+	t.Setenv(commitHashKey, "0123456789abcdef0123456789abcdef01234567")
 }

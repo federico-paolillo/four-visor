@@ -2,6 +2,7 @@
 package config
 
 import (
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net"
@@ -13,17 +14,31 @@ import (
 )
 
 const (
-	serverAddressKey     = "FOURVISOR_SERVER_ADDRESS"
-	healthTimeoutKey     = "FOURVISOR_HEALTH_TIMEOUT"
-	memcachedAddressKey  = "FOURVISOR_MEMCACHED_ADDRESS"
-	dnsNameKey           = "FOURVISOR_DNS_NAME"
-	otlpEndpointKey      = "FOURVISOR_OTLP_ENDPOINT"
-	defaultServerAddress = ":65102"
-	defaultHealthTimeout = 2 * time.Second
-	defaultDNSName       = "a.4cdn.org"
-	defaultOTLPEndpoint  = "http://otelcol:65103"
-	firstProjectPort     = 65100
-	lastProjectPort      = 65199
+	serverAddressKey      = "FOURVISOR_SERVER_ADDRESS"
+	healthTimeoutKey      = "FOURVISOR_HEALTH_TIMEOUT"
+	memcachedAddressKey   = "FOURVISOR_MEMCACHED_ADDRESS"
+	dnsNameKey            = "FOURVISOR_DNS_NAME"
+	otlpEndpointKey       = "FOURVISOR_OTLP_ENDPOINT"
+	rateIntervalKey       = "FOURVISOR_ACQUISITION_RATE_INTERVAL"
+	maxConcurrencyKey     = "FOURVISOR_ACQUISITION_MAX_CONCURRENCY"
+	requestTimeoutKey     = "FOURVISOR_ACQUISITION_REQUEST_TIMEOUT"
+	maxRetriesKey         = "FOURVISOR_ACQUISITION_MAX_RETRIES"
+	retryBackoffKey       = "FOURVISOR_ACQUISITION_RETRY_BACKOFF"
+	commitHashKey         = "FOURVISOR_COMMIT_HASH"
+	defaultServerAddress  = ":65102"
+	defaultHealthTimeout  = 2 * time.Second
+	defaultDNSName        = "a.4cdn.org"
+	defaultOTLPEndpoint   = "http://otelcol:65103"
+	defaultRateInterval   = time.Second
+	defaultConcurrency    = 10
+	defaultRequestTimeout = 5 * time.Second
+	defaultMaxRetries     = 2
+	defaultRetryBackoff   = time.Second
+	minimumRateInterval   = time.Second
+	maximumConcurrency    = 10
+	maximumRetries        = 2
+	firstProjectPort      = 65100
+	lastProjectPort       = 65199
 )
 
 var (
@@ -31,15 +46,28 @@ var (
 	errInvalidAddress  = errors.New("invalid network address")
 	errInvalidDuration = errors.New("invalid duration")
 	errInvalidDNSName  = errors.New("invalid DNS name")
+	errInvalidInteger  = errors.New("invalid integer")
+	errInvalidCommit   = errors.New("invalid commit hash")
 )
 
-// Config contains only the settings required by the backend health boundary.
+// Acquisition contains the bounded outbound policy and safe deployed User-Agent.
+type Acquisition struct {
+	RateInterval   time.Duration
+	MaxConcurrency int
+	RequestTimeout time.Duration
+	MaxRetries     int
+	RetryBackoff   time.Duration
+	UserAgent      string
+}
+
+// Config contains the settings required by the backend.
 type Config struct {
 	ServerAddress    string
 	HealthTimeout    time.Duration
 	MemcachedAddress string
 	DNSName          string
 	OTLPEndpoint     string
+	Acquisition      Acquisition
 }
 
 // Error preserves a configuration failure while keeping its rendered diagnostic value-free.
@@ -95,12 +123,63 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	acquisition, err := loadAcquisition()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		ServerAddress:    serverAddress,
 		HealthTimeout:    healthTimeout,
 		MemcachedAddress: memcachedAddress,
 		DNSName:          dnsName,
 		OTLPEndpoint:     otlpEndpoint,
+		Acquisition:      acquisition,
+	}, nil
+}
+
+func loadAcquisition() (Acquisition, error) {
+	rateInterval, err := duration(rateIntervalKey, defaultRateInterval)
+	if err != nil {
+		return Acquisition{}, err
+	}
+
+	if rateInterval < minimumRateInterval {
+		return Acquisition{}, configError(rateIntervalKey, "must be at least one second", errInvalidDuration)
+	}
+
+	maxConcurrency, err := integer(maxConcurrencyKey, defaultConcurrency, 1, maximumConcurrency)
+	if err != nil {
+		return Acquisition{}, err
+	}
+
+	requestTimeout, err := duration(requestTimeoutKey, defaultRequestTimeout)
+	if err != nil {
+		return Acquisition{}, err
+	}
+
+	maxRetries, err := integer(maxRetriesKey, defaultMaxRetries, 0, maximumRetries)
+	if err != nil {
+		return Acquisition{}, err
+	}
+
+	retryBackoff, err := duration(retryBackoffKey, defaultRetryBackoff)
+	if err != nil {
+		return Acquisition{}, err
+	}
+
+	commitHash := os.Getenv(commitHashKey)
+	if !validCommitHash(commitHash) {
+		return Acquisition{}, configError(commitHashKey, "must be a full lowercase Git commit hash", errInvalidCommit)
+	}
+
+	return Acquisition{
+		RateInterval:   rateInterval,
+		MaxConcurrency: maxConcurrency,
+		RequestTimeout: requestTimeout,
+		MaxRetries:     maxRetries,
+		RetryBackoff:   retryBackoff,
+		UserAgent:      "4Visor/" + commitHash,
 	}, nil
 }
 
@@ -120,6 +199,30 @@ func duration(key string, fallback time.Duration) (time.Duration, error) {
 	}
 
 	return parsed, nil
+}
+
+func integer(key string, fallback, minimum, maximum int) (int, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < minimum || parsed > maximum {
+		return 0, configError(key, "must be an integer in the allowed range", errors.Join(errInvalidInteger, err))
+	}
+
+	return parsed, nil
+}
+
+func validCommitHash(value string) bool {
+	if len(value) != 40 || value != strings.ToLower(value) {
+		return false
+	}
+
+	_, err := hex.DecodeString(value)
+
+	return err == nil
 }
 
 func valueOrDefault(key, fallback string) string {
