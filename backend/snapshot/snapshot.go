@@ -8,6 +8,8 @@ const (
 	Version = 1
 	// MaximumCatalogThreads is the version 1 catalog cardinality limit.
 	MaximumCatalogThreads = 250
+	// MaximumThreadPosts is the version 1 thread cardinality limit.
+	MaximumThreadPosts = 250
 
 	// StateFailed marks a known resource whose acquisition failed.
 	StateFailed State = "failed"
@@ -62,4 +64,49 @@ type ThreadEntry struct {
 type Thread struct {
 	State State              `json:"state"`
 	Posts *[]json.RawMessage `json:"posts,omitempty"`
+}
+
+// FailedResourceCount returns the number of explicit failed wrappers in the board tree.
+func (boards Boards) FailedResourceCount() int {
+	if boards.State == StateFailed {
+		return 1
+	}
+
+	if boards.Items == nil {
+		return 0
+	}
+
+	count := 0
+
+	for _, item := range *boards.Items {
+		count += failedCatalogResourceCount(item.Catalog)
+	}
+
+	return count
+}
+
+func failedCatalogResourceCount(catalog *Catalog) int {
+	if catalog == nil {
+		return 0
+	}
+
+	if catalog.State == StateFailed {
+		return 1
+	}
+
+	if catalog.Pages == nil {
+		return 0
+	}
+
+	count := 0
+
+	for _, page := range *catalog.Pages {
+		for _, entry := range page.Threads {
+			if entry.Thread != nil && entry.Thread.State == StateFailed {
+				count++
+			}
+		}
+	}
+
+	return count
 }

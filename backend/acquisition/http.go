@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -20,6 +21,7 @@ import (
 const (
 	boardsResource       = "boards"
 	catalogResource      = "catalog"
+	threadResource       = "thread"
 	errorNone            = "none"
 	errorNetwork         = "network"
 	errorTimeout         = "timeout"
@@ -64,7 +66,7 @@ func (failure *requestError) Unwrap() error {
 func (client *Client) fetchBoards(ctx context.Context) ([]observedBoard, error) {
 	var boards []observedBoard
 
-	err := client.fetch(ctx, boardsResource, client.boardsURL(), func(data []byte) error {
+	err := client.fetch(ctx, boardsResource, client.boardsURL(), func(_ context.Context, data []byte) error {
 		var parseError error
 
 		boards, parseError = parseBoards(data)
@@ -78,7 +80,7 @@ func (client *Client) fetchBoards(ctx context.Context) ([]observedBoard, error) 
 func (client *Client) fetchCatalog(ctx context.Context, board string) ([]snapshot.Page, error) {
 	var pages []snapshot.Page
 
-	err := client.fetch(ctx, catalogResource, client.catalogURL(board), func(data []byte) error {
+	err := client.fetch(ctx, catalogResource, client.catalogURL(board), func(_ context.Context, data []byte) error {
 		var parseError error
 
 		pages, parseError = parseCatalog(data)
@@ -89,10 +91,41 @@ func (client *Client) fetchCatalog(ctx context.Context, board string) ([]snapsho
 	return pages, err
 }
 
+func (client *Client) fetchThread(ctx context.Context, board string, number uint64) (snapshot.Thread, error) {
+	var thread snapshot.Thread
+
+	err := client.fetch(
+		ctx,
+		threadResource,
+		client.threadURL(board, number),
+		func(attemptCtx context.Context, data []byte) error {
+			var parseError error
+
+			thread, parseError = parseThread(data)
+			if parseError == nil && thread.State == snapshot.StateOversize {
+				attributes := []attribute.KeyValue{
+					attribute.String("resource.state", string(snapshot.StateOversize)),
+					attribute.Int("posts.limit", snapshot.MaximumThreadPosts),
+				}
+				trace.SpanFromContext(attemptCtx).SetAttributes(attributes...)
+				client.logger.WarnContext(attemptCtx, "oversized thread detected",
+					slog.String("resource.type", threadResource),
+					slog.String("resource.state", string(snapshot.StateOversize)),
+					slog.Int("posts.limit", snapshot.MaximumThreadPosts),
+				)
+			}
+
+			return parseError
+		},
+	)
+
+	return thread, err
+}
+
 func (client *Client) fetch(
 	ctx context.Context,
 	resource, target string,
-	decode func([]byte) error,
+	decode func(context.Context, []byte) error,
 ) error {
 	for attempt := 0; attempt <= client.policy.MaxRetries; attempt++ {
 		failure := client.attempt(ctx, resource, target, attempt, decode)
@@ -119,7 +152,7 @@ func (client *Client) attempt(
 	ctx context.Context,
 	resource, target string,
 	attempt int,
-	decode func([]byte) error,
+	decode func(context.Context, []byte) error,
 ) *requestError {
 	release, failure := client.beginAttempt(ctx)
 	if failure != nil {
@@ -160,7 +193,7 @@ func (client *Client) attempt(
 func (client *Client) perform(
 	ctx context.Context,
 	request *http.Request,
-	decode func([]byte) error,
+	decode func(context.Context, []byte) error,
 ) *requestError {
 	response, err := client.httpClient.Do(request)
 	if err != nil {
@@ -189,7 +222,7 @@ func (client *Client) perform(
 		return interruptedRequest(ctx, cause)
 	}
 
-	err = decode(body)
+	err = decode(ctx, body)
 
 	cause = context.Cause(ctx)
 	if cause != nil {

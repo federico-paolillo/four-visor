@@ -174,6 +174,46 @@ func TestErrorClassificationCauseAndDiagnostic(t *testing.T) {
 	}
 }
 
+func TestFailedResourceCount(t *testing.T) {
+	failedThread := &Thread{State: StateFailed}
+	presentPosts := []json.RawMessage{}
+	presentThread := &Thread{State: StatePresent, Posts: &presentPosts}
+	oversizePosts := make([]json.RawMessage, MaximumThreadPosts)
+	for index := range oversizePosts {
+		oversizePosts[index] = json.RawMessage(`{}`)
+	}
+
+	pages := []Page{{Threads: []ThreadEntry{
+		{Thread: failedThread},
+		{Thread: presentThread},
+		{Thread: &Thread{State: StateOversize, Posts: &oversizePosts}},
+		{},
+	}}}
+	items := []BoardItem{
+		{Catalog: &Catalog{State: StateFailed}},
+		{Catalog: &Catalog{State: StatePresent, Pages: &pages}},
+		{},
+	}
+
+	tests := []struct {
+		name   string
+		boards Boards
+		want   int
+	}{
+		{name: "failed boards", boards: Boards{State: StateFailed}, want: 1},
+		{name: "nested failures", boards: Boards{State: StatePresent, Items: &items}, want: 2},
+		{name: "absent items", boards: Boards{State: StatePresent}, want: 0},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.boards.FailedResourceCount(); got != test.want {
+				t.Fatalf("FailedResourceCount() = %d, want %d", got, test.want)
+			}
+		})
+	}
+}
+
 func minimalDocument(lineageID, observedAt string) []byte {
 	value := map[string]any{
 		"schemaVersion": Version,

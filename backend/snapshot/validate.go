@@ -13,9 +13,8 @@ import (
 )
 
 const (
-	maximumThreadPosts = 250
-	stateField         = "state"
-	ulidAlphabet       = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+	stateField   = "state"
+	ulidAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 )
 
 var (
@@ -367,11 +366,11 @@ func validateThreadPosts(object map[string]json.RawMessage, path string, oversiz
 		return err
 	}
 
-	if !oversize && len(values) > maximumThreadPosts {
+	if !oversize && len(values) > MaximumThreadPosts {
 		return contractError(path+".posts", "present state must contain at most 250 posts", nil)
 	}
 
-	if oversize && len(values) != maximumThreadPosts {
+	if oversize && len(values) != MaximumThreadPosts {
 		return contractError(path+".posts", "oversize state must contain exactly 250 posts", nil)
 	}
 

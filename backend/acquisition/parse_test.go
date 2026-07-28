@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"git.disroot.org/federico-paolillo/four-visor.git/snapshot"
@@ -57,6 +58,64 @@ func TestParseCatalogKeepsPageBoundariesAndFirst250Threads(t *testing.T) {
 	}
 }
 
+func TestParseThreadBoundsAndPreservesOpaquePosts(t *testing.T) {
+	tests := []struct {
+		name      string
+		count     int
+		wantState snapshot.State
+	}{
+		{name: "empty", count: 0, wantState: snapshot.StatePresent},
+		{name: "limit", count: snapshot.MaximumThreadPosts, wantState: snapshot.StatePresent},
+		{name: "oversize", count: snapshot.MaximumThreadPosts + 1, wantState: snapshot.StateOversize},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			thread, err := parseThread(threadDocument(t, test.count))
+			if err != nil {
+				t.Fatalf("parseThread() error = %v", err)
+			}
+			if thread.State != test.wantState || thread.Posts == nil ||
+				len(*thread.Posts) != min(test.count, snapshot.MaximumThreadPosts) {
+				t.Fatalf("parseThread() = %#v", thread)
+			}
+			if test.count > 0 && string((*thread.Posts)[0]) !=
+				`{"no":1,"com":"<b>post 1</b>","media":{"tim":1001,"ext":".png"}}` {
+				t.Fatalf("opaque first post changed: %s", (*thread.Posts)[0])
+			}
+			if test.count > snapshot.MaximumThreadPosts {
+				if cap(*thread.Posts) != snapshot.MaximumThreadPosts {
+					t.Fatalf("retained post capacity = %d", cap(*thread.Posts))
+				}
+				for _, post := range *thread.Posts {
+					if string(post) == `{"no":251,"com":"<b>post 251</b>","media":{"tim":1251,"ext":".png"}}` {
+						t.Fatal("post 251 was retained")
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestThreadNumber(t *testing.T) {
+	number, err := threadNumber(json.RawMessage(`{"no":18446744073709551615,"other":{"kept":true}}`))
+	if err != nil || number != ^uint64(0) {
+		t.Fatalf("threadNumber() = %d, %v", number, err)
+	}
+
+	for _, summary := range []string{
+		`{}`,
+		`{"no":0}`,
+		`{"no":-1}`,
+		`{"no":1.5}`,
+		`{"no":"1"}`,
+	} {
+		if _, err := threadNumber(json.RawMessage(summary)); err == nil {
+			t.Fatalf("threadNumber(%s) error = nil", summary)
+		}
+	}
+}
+
 func TestUpstreamValidation(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -77,6 +136,11 @@ func TestUpstreamValidation(t *testing.T) {
 		{name: "null threads", parse: parseCatalogError, data: `[{"page":1,"threads":null}]`},
 		{name: "summary not object", parse: parseCatalogError, data: `[{"page":1,"threads":[1]}]`},
 		{name: "trailing catalog", parse: parseCatalogError, data: `[] []`},
+		{name: "thread not object", parse: parseThreadError, data: `[]`},
+		{name: "missing posts", parse: parseThreadError, data: `{}`},
+		{name: "null posts", parse: parseThreadError, data: `{"posts":null}`},
+		{name: "post not object", parse: parseThreadError, data: `{"posts":[1]}`},
+		{name: "trailing thread", parse: parseThreadError, data: `{"posts":[]} {}`},
 	}
 
 	for _, test := range tests {
@@ -113,6 +177,26 @@ func catalogDocument(t *testing.T, pageSizes []int) []byte {
 	return data
 }
 
+func threadDocument(t *testing.T, count int) []byte {
+	t.Helper()
+	var output strings.Builder
+	output.WriteString(`{"posts":[`)
+	for index := range count {
+		if index > 0 {
+			output.WriteByte(',')
+		}
+		_, _ = fmt.Fprintf(&output,
+			`{"no":%d,"com":"<b>post %d</b>","media":{"tim":%d,"ext":".png"}}`,
+			index+1,
+			index+1,
+			1001+index,
+		)
+	}
+	output.WriteString(`]}`)
+
+	return []byte(output.String())
+}
+
 func parseBoardsError(data []byte) error {
 	_, err := parseBoards(data)
 
@@ -121,6 +205,12 @@ func parseBoardsError(data []byte) error {
 
 func parseCatalogError(data []byte) error {
 	_, err := parseCatalog(data)
+
+	return err
+}
+
+func parseThreadError(data []byte) error {
+	_, err := parseThread(data)
 
 	return err
 }

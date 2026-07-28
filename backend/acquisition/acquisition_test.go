@@ -50,6 +50,10 @@ func TestObserveConstructsFreshContractResources(t *testing.T) {
 				return response(http.StatusServiceUnavailable, `never logged`, nil), nil
 			case "/q/catalog.json":
 				return response(http.StatusOK, `[]`, nil), nil
+			case "/z/thread/9.json":
+				return response(http.StatusOK, `{"posts":[{"no":9,"com":"<b>kept</b>","tim":123}]}`, nil), nil
+			case "/z/thread/8.json":
+				return response(http.StatusNotFound, `gone`, nil), nil
 			default:
 				t.Fatalf("unexpected request path %q", request.URL.Path)
 
@@ -310,6 +314,205 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		cancel(cause)
 		if err := <-result; !errors.Is(err, cause) {
 			t.Fatalf("Observe() error = %v, want cancellation cause", err)
+		}
+	})
+}
+
+func TestHTTPServerThreadBoundaries(t *testing.T) {
+	tests := []struct {
+		name      string
+		postCount int
+		wantState snapshot.State
+	}{
+		{name: "zero posts", postCount: 0, wantState: snapshot.StatePresent},
+		{name: "250 posts", postCount: snapshot.MaximumThreadPosts, wantState: snapshot.StatePresent},
+		{name: "251 posts", postCount: snapshot.MaximumThreadPosts + 1, wantState: snapshot.StateOversize},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var threadRequests atomic.Int64
+			server := loopbackServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/boards.json":
+					_, _ = io.WriteString(writer, `{"boards":[{"board":"a"}]}`)
+				case "/a/catalog.json":
+					_, _ = io.WriteString(writer, `[{"page":1,"threads":[{"no":42,"com":"summary"}]}]`)
+				case "/a/thread/42.json":
+					threadRequests.Add(1)
+					_, _ = writer.Write(threadDocument(t, test.postCount))
+				default:
+					t.Errorf("unexpected remainder or media request %q", request.URL.Path)
+					http.NotFound(writer, request)
+				}
+			}))
+			policy := defaultPolicy()
+			policy.MaxRetries = 0
+			client := serverClient(t, server, policy, io.Discard)
+			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+			defer cancel()
+
+			boards, err := client.Observe(ctx)
+			if err != nil {
+				t.Fatalf("Observe() error = %v", err)
+			}
+			thread := (*(*(*boards.Items)[0].Catalog.Pages)[0].Threads[0].Thread)
+			if thread.State != test.wantState || thread.Posts == nil ||
+				len(*thread.Posts) != min(test.postCount, snapshot.MaximumThreadPosts) {
+				t.Fatalf("thread = %#v", thread)
+			}
+			if threadRequests.Load() != 1 {
+				t.Fatalf("thread requests = %d, want 1", threadRequests.Load())
+			}
+			if test.postCount > snapshot.MaximumThreadPosts &&
+				bytes.Contains((*thread.Posts)[snapshot.MaximumThreadPosts-1], []byte(`"no":251`)) {
+				t.Fatal("post 251 was exposed")
+			}
+		})
+	}
+}
+
+func TestHTTPServerThreadFailures(t *testing.T) {
+	t.Run("rate limit retries through shared policy", func(t *testing.T) {
+		var calls atomic.Int64
+		server := loopbackServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			switch request.URL.Path {
+			case "/boards.json":
+				_, _ = io.WriteString(writer, `{"boards":[{"board":"a"}]}`)
+			case "/a/catalog.json":
+				_, _ = io.WriteString(writer, `[{"page":1,"threads":[{"no":42}]}]`)
+			case "/a/thread/42.json":
+				if calls.Add(1) == 1 {
+					writer.Header().Set("Retry-After", "0")
+					writer.WriteHeader(http.StatusTooManyRequests)
+
+					return
+				}
+				_, _ = io.WriteString(writer, `{"posts":[]}`)
+			default:
+				http.NotFound(writer, request)
+			}
+		}))
+		policy := defaultPolicy()
+		policy.MaxRetries = 1
+		client := serverClient(t, server, policy, io.Discard)
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+
+		boards, err := client.Observe(ctx)
+		thread := (*(*boards.Items)[0].Catalog.Pages)[0].Threads[0].Thread
+		if err != nil || calls.Load() != 2 || thread == nil || thread.State != snapshot.StatePresent {
+			t.Fatalf("Observe() = %#v, %v calls=%d", boards, err, calls.Load())
+		}
+	})
+
+	t.Run("permanent error fails known thread", func(t *testing.T) {
+		var calls atomic.Int64
+		server := loopbackServer(t, http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			switch request.URL.Path {
+			case "/boards.json":
+				_, _ = io.WriteString(writer, `{"boards":[{"board":"a"}]}`)
+			case "/a/catalog.json":
+				_, _ = io.WriteString(writer, `[{"page":1,"threads":[{"no":42}]}]`)
+			case "/a/thread/42.json":
+				calls.Add(1)
+				http.Error(writer, "private", http.StatusNotFound)
+			default:
+				http.NotFound(writer, request)
+			}
+		}))
+		policy := defaultPolicy()
+		policy.MaxRetries = 2
+		client := serverClient(t, server, policy, io.Discard)
+		ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
+		defer cancel()
+
+		boards, err := client.Observe(ctx)
+		thread := (*(*boards.Items)[0].Catalog.Pages)[0].Threads[0].Thread
+		if err != nil || calls.Load() != 1 || thread == nil || thread.State != snapshot.StateFailed || thread.Posts != nil {
+			t.Fatalf("Observe() = %#v, %v calls=%d", boards, err, calls.Load())
+		}
+	})
+}
+
+func TestThreadOversizeTelemetryIsBoundedAndSecretFree(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		spanExporter := tracetest.NewInMemoryExporter()
+		tracerProvider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(spanExporter))
+		reader := metricsdk.NewManualReader()
+		meterProvider := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+		var logs bytes.Buffer
+		const boardID = "board-identifier-must-not-leak"
+		const threadID = "424242"
+		const content = "post-content-must-not-leak"
+
+		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Path {
+			case "/boards.json":
+				return response(http.StatusOK, `{"boards":[{"board":"`+boardID+`"}]}`, nil), nil
+			case "/" + boardID + "/catalog.json":
+				return response(http.StatusOK, `[{"page":1,"threads":[{"no":`+threadID+`}]}]`, nil), nil
+			case "/" + boardID + "/thread/" + threadID + ".json":
+				posts := threadDocument(t, snapshot.MaximumThreadPosts+1)
+				posts = bytes.Replace(posts, []byte("post 1"), []byte(content), 1)
+
+				return response(http.StatusOK, string(posts), nil), nil
+			default:
+				t.Fatalf("unexpected request path %q", request.URL.Path)
+
+				return nil, nil
+			}
+		})
+		client := fakeClient(
+			t,
+			defaultPolicy(),
+			transport,
+			&logs,
+			tracerProvider.Tracer("test/acquisition"),
+			meterProvider.Meter("test/acquisition"),
+		)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer cancel()
+		ctx, root := tracerProvider.Tracer("test/root").Start(ctx, "lineage.sync")
+
+		boards, err := client.Observe(ctx)
+		root.End()
+		if err != nil || (*(*(*boards.Items)[0].Catalog.Pages)[0].Threads[0].Thread).State != snapshot.StateOversize {
+			t.Fatalf("Observe() = %#v, %v", boards, err)
+		}
+
+		foundThreadSpan := false
+		for _, span := range spanExporter.GetSpans() {
+			if span.Name != "fetch.thread" {
+				continue
+			}
+			foundThreadSpan = true
+			attributes := attributeValues(span.Attributes)
+			if attributes["resource.state"] != string(snapshot.StateOversize) ||
+				attributes["posts.limit"] != fmt.Sprint(snapshot.MaximumThreadPosts) {
+				t.Fatalf("thread span attributes = %#v", attributes)
+			}
+			assertValuesExclude(t, attributes, boardID, threadID, content)
+		}
+		if !foundThreadSpan {
+			t.Fatal("fetch.thread span not found")
+		}
+		if strings.Count(strings.TrimSpace(logs.String()), "\n") != 0 ||
+			!strings.Contains(logs.String(), "oversized thread detected") {
+			t.Fatalf("oversize logs = %q", logs.String())
+		}
+		for _, forbidden := range []string{boardID, threadID, content, "/thread/", "example.test"} {
+			if strings.Contains(logs.String(), forbidden) {
+				t.Fatalf("oversize log disclosed %q: %s", forbidden, logs.String())
+			}
+		}
+
+		assertAcquisitionMetrics(t, reader)
+		if err := meterProvider.Shutdown(t.Context()); err != nil {
+			t.Fatalf("meter shutdown error = %v", err)
+		}
+		if err := tracerProvider.Shutdown(t.Context()); err != nil {
+			t.Fatalf("tracer shutdown error = %v", err)
 		}
 	})
 }

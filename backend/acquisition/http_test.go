@@ -230,6 +230,199 @@ func TestTimeoutDeadlineAndExternalCancellation(t *testing.T) {
 	})
 }
 
+func TestBoundedThreadWorkersPreserveCatalogOrder(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		releases := map[string]chan struct{}{
+			"/a/thread/1.json": make(chan struct{}),
+			"/a/thread/2.json": make(chan struct{}),
+			"/a/thread/3.json": make(chan struct{}),
+		}
+		releaseOnce := map[string]*sync.Once{
+			"/a/thread/1.json": {},
+			"/a/thread/2.json": {},
+			"/a/thread/3.json": {},
+		}
+		release := func(path string) {
+			releaseOnce[path].Do(func() { close(releases[path]) })
+		}
+		releaseAll := func() {
+			for path := range releases {
+				release(path)
+			}
+		}
+		started := make(chan string, 3)
+		var active atomic.Int64
+		var maximum atomic.Int64
+
+		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Path {
+			case "/boards.json":
+				return response(http.StatusOK, `{"boards":[{"board":"a"}]}`, nil), nil
+			case "/a/catalog.json":
+				return response(http.StatusOK, `[{"page":1,"threads":[{"no":1},{"no":2},{"no":3}]}]`, nil), nil
+			default:
+				release, exists := releases[request.URL.Path]
+				if !exists {
+					return nil, errors.New("unexpected thread request path")
+				}
+				current := active.Add(1)
+				for current > maximum.Load() && !maximum.CompareAndSwap(maximum.Load(), current) {
+				}
+				defer active.Add(-1)
+				started <- request.URL.Path
+
+				select {
+				case <-release:
+				case <-request.Context().Done():
+					return nil, request.Context().Err()
+				}
+
+				number := strings.TrimSuffix(strings.TrimPrefix(request.URL.Path, "/a/thread/"), ".json")
+
+				return response(http.StatusOK, `{"posts":[{"no":`+number+`}]}`, nil), nil
+			}
+		})
+		policy := defaultPolicy()
+		policy.MaxConcurrency = 2
+		policy.MaxRetries = 0
+		client := fakeClient(t, policy, transport, io.Discard, nil, nil)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer func() {
+			cancel()
+			releaseAll()
+		}()
+		nextStarted := func() string {
+			select {
+			case path := <-started:
+				return path
+			case <-ctx.Done():
+				t.Fatalf("waiting for transport entry: %v", context.Cause(ctx))
+
+				return ""
+			}
+		}
+
+		type result struct {
+			boards snapshot.Boards
+			err    error
+		}
+		results := make(chan result, 1)
+		go func() {
+			boards, err := client.Observe(ctx)
+			results <- result{boards: boards, err: err}
+		}()
+
+		first := nextStarted()
+		second := nextStarted()
+		firstTwo := map[string]bool{first: true, second: true}
+		if len(firstTwo) != 2 || !firstTwo["/a/thread/1.json"] || !firstTwo["/a/thread/2.json"] ||
+			active.Load() != 2 {
+			t.Fatalf("started = [%s %s], active=%d", first, second, active.Load())
+		}
+		release(second)
+		third := nextStarted()
+		if third != "/a/thread/3.json" {
+			t.Fatalf("third start = %s", third)
+		}
+		release(third)
+		release(first)
+
+		got := <-results
+		if got.err != nil || maximum.Load() != 2 {
+			t.Fatalf("Observe() error = %v, maximum workers = %d", got.err, maximum.Load())
+		}
+		entries := (*(*got.boards.Items)[0].Catalog.Pages)[0].Threads
+		for index, entry := range entries {
+			if entry.Thread == nil || entry.Thread.State != snapshot.StatePresent ||
+				string((*entry.Thread.Posts)[0]) != `{"no":`+strconv.Itoa(index+1)+`}` {
+				t.Fatalf("entry %d changed position: %#v", index, entry)
+			}
+		}
+	})
+}
+
+func TestThreadDeadlineFailsInFlightAndUndispatched(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var threadCalls atomic.Int64
+		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Path {
+			case "/boards.json":
+				return response(http.StatusOK, `{"boards":[{"board":"a"}]}`, nil), nil
+			case "/a/catalog.json":
+				return response(http.StatusOK, `[{"page":1,"threads":[{"no":1},{"no":2},{"no":3}]}]`, nil), nil
+			default:
+				threadCalls.Add(1)
+				<-request.Context().Done()
+
+				return nil, request.Context().Err()
+			}
+		})
+		policy := defaultPolicy()
+		policy.MaxConcurrency = 1
+		policy.MaxRetries = 0
+		client := fakeClient(t, policy, transport, io.Discard, nil, nil)
+		ctx, cancel := context.WithTimeout(t.Context(), 2500*time.Millisecond)
+		defer cancel()
+
+		boards, err := client.Observe(ctx)
+		if err != nil || boards.FailedResourceCount() != 3 || threadCalls.Load() != 1 {
+			t.Fatalf("Observe() = %#v, %v failures=%d calls=%d",
+				boards, err, boards.FailedResourceCount(), threadCalls.Load())
+		}
+		for index, entry := range (*(*boards.Items)[0].Catalog.Pages)[0].Threads {
+			if entry.Thread == nil || entry.Thread.State != snapshot.StateFailed || entry.Thread.Posts != nil {
+				t.Fatalf("thread %d = %#v", index, entry.Thread)
+			}
+		}
+	})
+}
+
+func TestExternalCancellationAbortsThreadAcquisition(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		started := make(chan struct{})
+		var threadCalls atomic.Int64
+		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			switch request.URL.Path {
+			case "/boards.json":
+				return response(http.StatusOK, `{"boards":[{"board":"a"}]}`, nil), nil
+			case "/a/catalog.json":
+				return response(http.StatusOK, `[{"page":1,"threads":[{"no":1},{"no":2}]}]`, nil), nil
+			default:
+				threadCalls.Add(1)
+				close(started)
+				<-request.Context().Done()
+
+				return nil, request.Context().Err()
+			}
+		})
+		policy := defaultPolicy()
+		policy.MaxConcurrency = 1
+		policy.MaxRetries = 0
+		client := fakeClient(t, policy, transport, io.Discard, nil, nil)
+		deadlineCtx, deadlineCancel := context.WithTimeout(t.Context(), time.Hour)
+		defer deadlineCancel()
+		ctx, cancel := context.WithCancelCause(deadlineCtx)
+		cause := errors.New("shutdown requested")
+
+		type result struct {
+			boards snapshot.Boards
+			err    error
+		}
+		results := make(chan result, 1)
+		go func() {
+			boards, err := client.Observe(ctx)
+			results <- result{boards: boards, err: err}
+		}()
+
+		<-started
+		cancel(cause)
+		got := <-results
+		if !errors.Is(got.err, cause) || got.boards.State != "" || got.boards.Items != nil || threadCalls.Load() != 1 {
+			t.Fatalf("Observe() = %#v, %v calls=%d", got.boards, got.err, threadCalls.Load())
+		}
+	})
+}
+
 func TestPreCanceledContextDoesNotEnterTransport(t *testing.T) {
 	var calls atomic.Int64
 	transport := roundTripFunc(func(*http.Request) (*http.Response, error) {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"git.disroot.org/federico-paolillo/four-visor.git/snapshot"
@@ -151,6 +152,70 @@ func parsePage(raw json.RawMessage, remaining int) (snapshot.Page, error) {
 	return snapshot.Page{Metadata: metadata, Threads: threads}, nil
 }
 
+func parseThread(data []byte) (snapshot.Thread, error) {
+	var document map[string]json.RawMessage
+
+	err := decodeDocument(data, &document)
+	if err != nil {
+		return snapshot.Thread{}, fmt.Errorf("decoding thread: %w", err)
+	}
+
+	if document == nil {
+		return snapshot.Thread{}, errors.New("thread must be an object")
+	}
+
+	rawPosts, exists := document["posts"]
+	if !exists || firstByte(rawPosts) != '[' {
+		return snapshot.Thread{}, errors.New("thread must contain a posts array")
+	}
+
+	var posts []json.RawMessage
+
+	err = json.Unmarshal(rawPosts, &posts)
+	if err != nil {
+		return snapshot.Thread{}, fmt.Errorf("decoding thread posts: %w", err)
+	}
+
+	for _, post := range posts {
+		if firstByte(post) != '{' {
+			return snapshot.Thread{}, errors.New("thread post must be an object")
+		}
+	}
+
+	state := snapshot.StatePresent
+
+	if len(posts) > snapshot.MaximumThreadPosts {
+		retained := make([]json.RawMessage, snapshot.MaximumThreadPosts)
+		copy(retained, posts)
+		posts = retained
+		state = snapshot.StateOversize
+	}
+
+	return snapshot.Thread{State: state, Posts: &posts}, nil
+}
+
+func threadNumber(summary json.RawMessage) (uint64, error) {
+	var object map[string]json.RawMessage
+
+	err := json.Unmarshal(summary, &object)
+	if err != nil {
+		return 0, fmt.Errorf("decoding catalog summary: %w", err)
+	}
+
+	var number uint64
+
+	err = json.Unmarshal(object["no"], &number)
+	if err != nil {
+		return 0, fmt.Errorf("decoding catalog thread identifier: %w", err)
+	}
+
+	if number == 0 {
+		return 0, errors.New("catalog summary must contain a positive integer thread identifier")
+	}
+
+	return number, nil
+}
+
 func decodeDocument(data []byte, destination any) error {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 
@@ -179,6 +244,15 @@ func (client *Client) boardsURL() string {
 
 func (client *Client) catalogURL(board string) string {
 	return endpointURL(client.baseURL, url.PathEscape(board), "catalog.json")
+}
+
+func (client *Client) threadURL(board string, number uint64) string {
+	return endpointURL(
+		client.baseURL,
+		url.PathEscape(board),
+		"thread",
+		strconv.FormatUint(number, 10)+".json",
+	)
 }
 
 func endpointURL(base *url.URL, escapedElements ...string) string {

@@ -75,8 +75,25 @@ to the upstream API's `If-Modified-Since` recommendation: a genuine `304`
 revalidation needs a prior representation, which this fresh lineage forbids.
 A fixed or token-valued header would not validate freshness or reduce upstream
 work, so no fake conditional header is sent. The story's fresh/no-reuse
-semantics take precedence. Scheduling and thread-body acquisition are added by
-later stories.
+semantics take precedence. Scheduling and publication are added by later
+stories.
+
+Each retained catalog summary is expanded through the same shared client into
+its current thread observation. Thread jobs use a fixed number of workers no
+greater than the configured outbound concurrency, while every attempt remains
+subject to the existing process-wide rate, concurrency, timeout, and retry
+policy. Catalog, page, summary, and post order never depends on completion
+order. Known terminal failures and lineage-deadline-expired jobs remain visible
+as failed thread resources; external or shutdown cancellation aborts the whole
+observation.
+
+The official 4chan API exposes one complete-thread JSON endpoint and provides
+no post limit or pagination. Consequently, 4Visor makes the ordinary single
+thread request (plus policy retries when applicable), inspects its returned post
+count, retains at most the first 250 opaque post objects, and marks 251 or more
+as `oversize`. It never requests a remainder or any media binary. Original post
+HTML and attachment references stay unchanged inside the retained opaque JSON;
+discarded posts are neither retained nor exposed.
 
 Network failures, request timeouts, and HTTP `429` responses may be retried.
 Other HTTP failures and invalid upstream JSON are not retried. Retry delay is

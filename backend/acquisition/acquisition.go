@@ -50,6 +50,14 @@ type Client struct {
 	lastStart   time.Time
 }
 
+type threadJob struct {
+	board  string
+	number uint64
+	entry  *snapshot.ThreadEntry
+	thread snapshot.Thread
+	err    error
+}
+
 // New creates a production client for the official 4chan API.
 func New(
 	policy Policy,
@@ -126,7 +134,7 @@ func newClient(
 	}, nil
 }
 
-// Observe constructs fresh board and catalog resources under the caller's lineage deadline.
+// Observe constructs fresh board, catalog, and thread resources under the caller's lineage deadline.
 func (client *Client) Observe(ctx context.Context) (snapshot.Boards, error) {
 	if _, ok := ctx.Deadline(); !ok {
 		return snapshot.Boards{}, ErrLineageDeadlineRequired
@@ -181,7 +189,115 @@ func (client *Client) Observe(ctx context.Context) (snapshot.Boards, error) {
 		client.logFailure(ctx, catalogResource, failure)
 	}
 
+	jobs := collectThreadJobs(boards, items)
+	client.acquireThreads(ctx, jobs)
+
+	cancellation = externalCancellation(ctx)
+	if cancellation != nil {
+		return snapshot.Boards{}, cancellation
+	}
+
+	client.applyThreadResults(ctx, jobs)
+
 	return snapshot.Boards{State: snapshot.StatePresent, Items: &items}, nil
+}
+
+func (client *Client) applyThreadResults(ctx context.Context, jobs []threadJob) {
+	unfinished := 0
+
+	for index := range jobs {
+		job := &jobs[index]
+		if job.err == nil && job.thread.State != "" {
+			job.entry.Thread = &snapshot.Thread{State: job.thread.State, Posts: job.thread.Posts}
+
+			continue
+		}
+
+		job.entry.Thread = &snapshot.Thread{State: snapshot.StateFailed}
+		if job.err == nil {
+			unfinished++
+
+			continue
+		}
+
+		client.logFailure(ctx, threadResource, job.err)
+	}
+
+	if unfinished > 0 {
+		client.logger.ErrorContext(ctx, "thread acquisition unfinished",
+			slog.String("resource.type", threadResource),
+			slog.Int("resource.failed.count", unfinished),
+			slog.String("error.type", errorDeadline),
+			slog.String("error.cause.type", causeLineageDeadline),
+		)
+	}
+}
+
+func collectThreadJobs(boards []observedBoard, items []snapshot.BoardItem) []threadJob {
+	jobs := make([]threadJob, 0)
+
+	for boardIndex := range items {
+		catalog := items[boardIndex].Catalog
+		if catalog == nil || catalog.State != snapshot.StatePresent || catalog.Pages == nil {
+			continue
+		}
+
+		for pageIndex := range *catalog.Pages {
+			page := &(*catalog.Pages)[pageIndex]
+			for threadIndex := range page.Threads {
+				entry := &page.Threads[threadIndex]
+				number, err := threadNumber(entry.Summary)
+				job := threadJob{board: boards[boardIndex].id, number: number, entry: entry}
+
+				if err != nil {
+					job.err = &requestError{kind: errorInvalid, cause: err}
+				}
+
+				jobs = append(jobs, job)
+			}
+		}
+	}
+
+	return jobs
+}
+
+func (client *Client) acquireThreads(ctx context.Context, jobs []threadJob) {
+	workerCount := min(client.policy.MaxConcurrency, len(jobs))
+	if workerCount == 0 {
+		return
+	}
+
+	queue := make(chan *threadJob)
+
+	var workers sync.WaitGroup
+
+	for range workerCount {
+		workers.Go(func() {
+			for job := range queue {
+				if ctx.Err() != nil {
+					return
+				}
+
+				job.thread, job.err = client.fetchThread(ctx, job.board, job.number)
+			}
+		})
+	}
+
+dispatch:
+	for index := range jobs {
+		if jobs[index].err != nil {
+			continue
+		}
+
+		select {
+		case queue <- &jobs[index]:
+		case <-ctx.Done():
+			break dispatch
+		}
+	}
+
+	close(queue)
+	workers.Wait()
 }
 
 func (client *Client) logFailure(ctx context.Context, resource string, err error) {
