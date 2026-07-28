@@ -32,6 +32,9 @@ prepared personally by me.
 - `backend/` contains backend code. Written in Go
 - `frontend/` containes frontend code. Written in TypeScript
 
+The backend and frontend enforce the same fixture-backed
+[snapshot version 1 contract](docs/snapshot-v1-contract.md).
+
 ### Backend health service
 
 The backend currently serves only `GET /health`. It returns `200 OK` when
@@ -79,6 +82,6 @@ go run ./cmd/app
 > Run these Mise-en-Place tasks to verify frontend
 
 - `fe:lint`
-- `fe:typecheck`
+- `fe:check`
 - `fe:build`
 - `fe:test`

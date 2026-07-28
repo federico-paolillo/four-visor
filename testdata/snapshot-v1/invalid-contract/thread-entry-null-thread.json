@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "lineageId": "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
+  "observedAt": "2026-07-26T12:00:00Z",
+  "boards": {
+    "state": "present",
+    "items": [
+      {
+        "board": {
+          "board": "g",
+          "title": "Technology",
+          "ws_board": 1,
+          "nested": {
+            "enabled": true,
+            "value": null
+          }
+        },
+        "catalog": {
+          "state": "present",
+          "pages": [
+            {
+              "metadata": {
+                "page": 1,
+                "extra": "kept",
+                "ranges": [
+                  3,
+                  2,
+                  1
+                ]
+              },
+              "threads": [
+                {
+                  "summary": {
+                    "no": 100,
+                    "sub": "thread-100",
+                    "flags": [
+                      "a",
+                      "b"
+                    ]
+                  },
+                  "thread": null
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+}

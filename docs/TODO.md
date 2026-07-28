@@ -16,7 +16,7 @@
 ## User Stories
 
 - [x] US-001 Run a configured and diagnosable backend health boundary
-- [ ] US-002 Enforce the exact snapshot version 1 contract at both boundaries
+- [x] US-002 Enforce the exact snapshot version 1 contract at both boundaries
 - [ ] US-003 Observe every board and its first 250 catalog threads
 - [ ] US-004 Complete lineages with bounded thread acquisition
 - [ ] US-005 Publish one immutable lineage atomically through Memcached

@@ -23,7 +23,7 @@ env = { CGO_ENABLED = 1 }
 dir = "frontend/"
 run = "npm run lint"
 
-[tasks."fe:typecheck"]
+[tasks."fe:check"]
 dir = "frontend/"
 run = "npm run typecheck"
 
