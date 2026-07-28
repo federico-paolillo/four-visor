@@ -69,7 +69,7 @@ Agents must not edit final deliverables directly.
 Instead, each agent writes its findings into temporary planning artifacts under:
 
 ```text
-.planning/
+.agents/planning/
 ```
 
 The Coordinator is solely responsible for producing the final files.
@@ -213,7 +213,7 @@ Do not check any boxes.
 Generate:
 
 ```text
-.planning/TRACEABILITY.md
+.agents/planning/TRACEABILITY.md
 ```
 
 Map every relevant section of `docs/SEED.md` to:
@@ -247,7 +247,7 @@ Resolve reviewer findings before finalizing whenever possible.
 Unresolved issues should be recorded in:
 
 ```text
-.planning/OPEN_QUESTIONS.md
+.agents/planning/OPEN_QUESTIONS.md
 ```
 
 # Deliverables
@@ -258,9 +258,9 @@ Produce:
 docs/madrs/
 docs/stories/
 docs/TODO.md
-.planning/TRACEABILITY.md
-.planning/AGENT_REPORT.md
-.planning/OPEN_QUESTIONS.md
+.agents/planning/TRACEABILITY.md
+.agents/planning/AGENT_REPORT.md
+.agents/planning/OPEN_QUESTIONS.md
 ```
 
 `AGENT_REPORT.md` must record:
