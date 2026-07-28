@@ -32,21 +32,53 @@ prepared personally by me.
 - `backend/` contains backend code. Written in Go
 - `frontend/` containes frontend code. Written in TypeScript
 
+### Backend health service
+
+The backend currently serves only `GET /health`. It returns `200 OK` when
+Memcached answers a protocol query and `a.4cdn.org` resolves, otherwise it
+returns `503 Service Unavailable` within the configured health timeout. Response
+bodies are deliberately non-contractual and never contain dependency details.
+Unsupported methods return `405`, undeclared routes return `404`, and there is
+no readiness endpoint.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `FOURVISOR_SERVER_ADDRESS` | `:65102` | Backend HTTP listener. |
+| `FOURVISOR_HEALTH_TIMEOUT` | `2s` | Total Memcached and DNS health deadline. |
+| `FOURVISOR_MEMCACHED_ADDRESS` | required | Memcached host and project port. |
+| `FOURVISOR_DNS_NAME` | `a.4cdn.org` | 4chan hostname resolved by health checks. |
+| `FOURVISOR_OTLP_ENDPOINT` | `http://otelcol:65103` | OTLP/gRPC Collector URL; HTTPS and arbitrary remote ports are supported. |
+
+Empty, malformed, or out-of-range project-local settings stop startup with a
+diagnostic that names the setting but not its value. The backend emits JSON
+error logs and exports logs, metrics, and traces through OTLP. Collector or
+exporter unavailability can lose telemetry but never changes health processing.
+
+For a loopback-only local run with Memcached already listening on a project
+port:
+
+```sh
+cd backend
+FOURVISOR_SERVER_ADDRESS=127.0.0.1:65102 \
+FOURVISOR_MEMCACHED_ADDRESS=127.0.0.1:65100 \
+go run ./cmd/app
+```
+
 ## Verification
 
 ### Backend
 
 > Run these Mise-en-Place tasks to verify backend
 
-- `fe:lint`
-- `fe:typecheck`
-- `fe:build`
-- `fe:test`
+- `be:build`
+- `be:lint`
+- `be:test`
 
 ### Frontend
 
 > Run these Mise-en-Place tasks to verify frontend
 
-- `be:build`
-- `be:lint`
-- `be:test`
+- `fe:lint`
+- `fe:typecheck`
+- `fe:build`
+- `fe:test`

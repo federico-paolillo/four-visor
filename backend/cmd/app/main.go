@@ -1,7 +1,17 @@
+// Package main wires the configured 4Visor backend health service.
 package main
 
-import "os"
+import (
+	"context"
+	"log/slog"
+	"os"
+)
 
+// main reports the single safe process-boundary diagnostic and exits non-zero on failure.
 func main() {
-	os.Exit(0)
+	err := run(context.Background(), os.Stderr)
+	if err != nil {
+		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("backend stopped", slog.Any("error", err))
+		os.Exit(1)
+	}
 }

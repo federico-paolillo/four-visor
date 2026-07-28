@@ -12,7 +12,7 @@ run = "golangci-lint run"
 
 [tasks."be:build"]
 dir = "backend/"
-run = "go build -v ./..."
+run = "go build -v -o /dev/null ./..."
 
 [tasks."be:test"]
 dir = "backend/"
