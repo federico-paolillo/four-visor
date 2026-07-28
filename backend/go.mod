@@ -3,6 +3,7 @@ module git.disroot.org/federico-paolillo/four-visor.git
 go 1.26.5
 
 require (
+	github.com/bradfitz/gomemcache v0.0.0-20260422231931-4d751bb6e37c
 	go.opentelemetry.io/contrib/bridges/otelslog v0.19.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.69.0
 	go.opentelemetry.io/otel v1.44.0

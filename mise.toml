@@ -16,7 +16,28 @@ run = "go build -v -o /dev/null ./..."
 
 [tasks."be:test"]
 dir = "backend/"
-run = "go test -race -shuffle=on ./..."
+run = '''
+set -eu
+compose() {
+  docker compose -p four-visor-test -f ../docker-compose.yml -f ../docker-compose.test.yml "$@"
+}
+cleanup() {
+  compose down --remove-orphans >/dev/null 2>&1 || true
+}
+start_cache() {
+  cleanup
+  compose up --wait --wait-timeout 30 memcached
+}
+trap cleanup EXIT INT TERM
+start_cache
+FOURVISOR_TEST_MEMCACHED_ADDRESS=127.0.0.1:65198 \
+  FOURVISOR_TEST_MEMCACHED_PRESSURE=0 \
+  go test -race -shuffle=on ./...
+start_cache
+FOURVISOR_TEST_MEMCACHED_ADDRESS=127.0.0.1:65198 \
+  FOURVISOR_TEST_MEMCACHED_PRESSURE=1 \
+  go test -race -count=1 -run '^TestMemcachedMemoryPressureCannotEvictActiveLineage$' ./lineage
+'''
 env = { CGO_ENABLED = 1 }
 
 [tasks."fe:lint"]

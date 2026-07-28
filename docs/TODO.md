@@ -19,7 +19,7 @@
 - [x] US-002 Enforce the exact snapshot version 1 contract at both boundaries
 - [x] US-003 Observe every board and its first 250 catalog threads
 - [x] US-004 Complete lineages with bounded thread acquisition
-- [ ] US-005 Publish one immutable lineage atomically through Memcached
+- [x] US-005 Publish one immutable lineage atomically through Memcached
 - [ ] US-006 Serve the active lineage as one logical snapshot
 - [ ] US-007 Build and activate lineages on the backend schedule
 - [ ] US-008 Install and reopen the application shell offline

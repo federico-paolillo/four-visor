@@ -152,6 +152,15 @@ func TestUTCSpellingsAndULIDCasing(t *testing.T) {
 	}
 }
 
+func TestValidLineageID(t *testing.T) {
+	if !ValidLineageID("01j1yq7y0m4s6r8t2v3w5x7y9z") {
+		t.Fatal("ValidLineageID() rejected a contract-valid lowercase ULID")
+	}
+	if ValidLineageID("81J1YQ7Y0M4S6R8T2V3W5X7Y9") {
+		t.Fatal("ValidLineageID() accepted an overflowing ULID")
+	}
+}
+
 func TestErrorClassificationCauseAndDiagnostic(t *testing.T) {
 	_, err := Parse([]byte(`{"schemaVersion":!}`))
 	if !errors.Is(err, ErrInvalidJSON) {

@@ -156,7 +156,7 @@ func validateSnapshot(raw json.RawMessage) error {
 		return err
 	}
 
-	if !validULID(lineageID) {
+	if !ValidLineageID(lineageID) {
 		return contractError("snapshot.lineageId", "must be a valid ULID", nil)
 	}
 
@@ -508,7 +508,8 @@ func firstByte(raw json.RawMessage) byte {
 	return trimmed[0]
 }
 
-func validULID(value string) bool {
+// ValidLineageID reports whether value is a snapshot version 1 ULID.
+func ValidLineageID(value string) bool {
 	if len(value) != 26 || value[0] < '0' || value[0] > '7' {
 		return false
 	}

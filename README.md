@@ -105,6 +105,25 @@ partial result. Successful requests and retries are not logged. Each terminal
 resource degradation emits one value-free error log, while outbound spans and
 metrics omit raw URLs, response bodies, and board identifiers.
 
+### Memcached lineage publication
+
+A completed snapshot is validated and serialized before Memcached is mutated.
+The backend stores its ordered 512 KiB blocks under immutable lineage-scoped
+entries, verifies every block, then stores and verifies completion metadata.
+Only after those checks does one atomic active-lineage pointer replacement make
+the lineage visible. The backend is the single pointer-writer authority; no
+distributed lock or compare-and-swap protocol is involved. All lineage entries
+share a cleanup deadline calculated from twice the synchronization interval.
+After activation, the prior completion entry and blocks are deleted immediately;
+deletion failure leaves the new lineage active and its TTL remains the cleanup
+fallback.
+
+Memcached is disposable serving state. Restart, loss, expiry after verification,
+or a reader racing immediate eviction of a previously observed pointer can make
+a lineage incomplete; the snapshot route added by US-006 reports that state as
+`410 Gone`. There is no file, database, recovery copy, or request-triggered
+rebuild. The next scheduled synchronization is the only server-side recovery.
+
 For a loopback-only local run with Memcached already listening on a project
 port:
 

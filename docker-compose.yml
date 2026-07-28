@@ -7,7 +7,14 @@ services:
   memcached:
     image: memcached:1.6.45-alpine
     restart: unless-stopped
-    command: ["memcached", "--port=65100", "--memory-limit=64"]
+    command:
+      [
+        "memcached",
+        "--port=65100",
+        "--memory-limit=64",
+        "--max-item-size=1m",
+        "--disable-evictions",
+      ]
     networks:
       - cache
   frontend:
