@@ -10,6 +10,9 @@ readonly edge_image='caddy:2.11.4-alpine@sha256:98eb57d882ccd5213d1688764db10c1c
 readonly collector_image='ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.157.0@sha256:4eb842091c796156d4d3c994eb22ba793590f5723719dbf6b8436cb4dfc17f48'
 readonly edge_name='four-visor-us017-edge-config-validation'
 readonly collector_name='four-visor-us017-collector-config-validation'
+readonly capture_name='four-visor-us018-collector-capture'
+readonly policy_name='four-visor-us018-collector-policy'
+readonly policy_network='four-visor-us018-collector-validation'
 
 validation_directory="$(mktemp -d "${TMPDIR:-/tmp}/four-visor-us017-compose.XXXXXX")"
 readonly validation_directory
@@ -18,12 +21,21 @@ readonly override_env="$validation_directory/override.env"
 readonly baseline_json="$validation_directory/baseline.json"
 readonly override_json="$validation_directory/override.json"
 readonly caddy_json="$validation_directory/caddy.json"
+readonly capture_config="$validation_directory/capture.yaml"
+readonly capture_output="$validation_directory/output"
+readonly captured_traces="$capture_output/traces.json"
+readonly captured_metrics="$capture_output/metrics.json"
+readonly captured_logs="$capture_output/logs.json"
 readonly edge_cidfile="$validation_directory/edge.cid"
 readonly collector_cidfile="$validation_directory/collector.cid"
-readonly -a cidfiles=("$edge_cidfile" "$collector_cidfile")
+readonly capture_cidfile="$validation_directory/capture.cid"
+readonly policy_cidfile="$validation_directory/policy.cid"
+readonly -a cidfiles=("$edge_cidfile" "$collector_cidfile" "$capture_cidfile" "$policy_cidfile")
 readonly -a compose_environment=(
 	FOURVISOR_COMMIT_HASH
-	OTEL_EXPORTER_OTLP_ENDPOINT
+	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
+	OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
+	OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
 	FOURVISOR_HEALTH_TIMEOUT
 	FOURVISOR_DNS_NAME
 	FOURVISOR_OTLP_ENDPOINT
@@ -65,8 +77,14 @@ cleanup() {
 		fi
 		rm -f -- "$cidfile"
 	done
+	if docker network inspect "$policy_network" >/dev/null 2>&1; then
+		docker network rm "$policy_network" >/dev/null 2>&1 || true
+	fi
 
-	rm -f -- "$baseline_env" "$override_env" "$baseline_json" "$override_json" "$caddy_json"
+	rm -f -- \
+		"$baseline_env" "$override_env" "$baseline_json" "$override_json" "$caddy_json" \
+		"$capture_config" "$captured_traces" "$captured_metrics" "$captured_logs"
+	rmdir -- "$capture_output" 2>/dev/null || true
 	rmdir -- "$validation_directory" 2>/dev/null || true
 }
 
@@ -87,14 +105,46 @@ render_compose() {
 	)
 }
 
+wait_for_loopback_port() {
+	local port="$1"
+	node - "$port" <<'NODE'
+const net = require("node:net");
+
+const port = Number(process.argv[2]);
+const deadline = Date.now() + 10_000;
+
+function attempt() {
+  const socket = net.createConnection({ host: "127.0.0.1", port });
+  socket.setTimeout(250);
+  socket.once("connect", () => {
+    socket.destroy();
+    process.exit(0);
+  });
+  const retry = () => {
+    socket.destroy();
+    if (Date.now() >= deadline) process.exit(1);
+    setTimeout(attempt, 100);
+  };
+  socket.once("error", retry);
+  socket.once("timeout", retry);
+}
+
+attempt();
+NODE
+}
+
 cat >"$baseline_env" <<'EOF'
 FOURVISOR_COMMIT_HASH=0000000000000000000000000000000000000000
-OTEL_EXPORTER_OTLP_ENDPOINT=collector.invalid:65103
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=traces.invalid:65103
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=metrics.invalid:65103
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=logs.invalid:65103
 EOF
 
 cat >"$override_env" <<'EOF'
 FOURVISOR_COMMIT_HASH=0000000000000000000000000000000000000000
-OTEL_EXPORTER_OTLP_ENDPOINT=collector.invalid:65103
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=traces.invalid:65103
+OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=metrics.invalid:65103
+OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=logs.invalid:65103
 FOURVISOR_HEALTH_TIMEOUT=750ms
 FOURVISOR_DNS_NAME=boards.4chan.org
 FOURVISOR_OTLP_ENDPOINT=http://otelcol:65103
@@ -222,7 +272,11 @@ assert.deepEqual(services.memcached.command, [
   "--disable-evictions",
 ]);
 assert.deepEqual(services.otelcol.command, ["--config=/etc/otelcol-contrib/config.yaml"]);
-assert.deepEqual(services.otelcol.environment, { OTEL_EXPORTER_OTLP_ENDPOINT: "collector.invalid:65103" });
+assert.deepEqual(services.otelcol.environment, {
+  OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "logs.invalid:65103",
+  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "metrics.invalid:65103",
+  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "traces.invalid:65103",
+});
 
 assert.deepEqual(services.backend.healthcheck, {
   test: ["CMD", "/usr/bin/four-visor", "healthcheck", "http://127.0.0.1:65102/health"],
@@ -249,14 +303,45 @@ for (const field of ["host_ip: 127.0.0.1", 'published: "65199"', "target: 65199"
 }
 assert.equal(/^\s+expose:/m.test(composeSource), false, "source expose");
 assert.equal(/^\s+depends_on:/m.test(composeSource), false, "source depends_on");
+assert.equal(composeSource.includes("OTEL_EXPORTER_OTLP_ENDPOINT"), false, "ambiguous Collector endpoint");
 assert.equal(composeSource.includes("FOURVISOR_OTLP_EXPORT_ENDPOINT"), false, "project-prefixed Collector endpoint");
 assert.equal(composeSource.includes("FOURVISOR_SERVER_ADDRESS"), false, "backend listener override");
 NODE
 
 collector_source="$(<"$project_root/otel-collector.yaml")"
 grep -Fq 'endpoint: 0.0.0.0:65103' <<<"$collector_source" || fail 'Collector OTLP/gRPC listener is missing'
-grep -Fq 'endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT}' <<<"$collector_source" || fail 'Collector native exporter endpoint is missing'
-if grep -Eq '65104|FOURVISOR_OTLP_EXPORT_ENDPOINT|^[[:space:]]+http:' <<<"$collector_source"; then
+for signal in TRACES METRICS LOGS; do
+	grep -Fq "endpoint: \${env:OTEL_EXPORTER_OTLP_${signal}_ENDPOINT}" <<<"$collector_source" || \
+		fail "Collector native ${signal,,} exporter endpoint is missing"
+done
+for field in \
+	'sampling_strategy: trace-complete' \
+	'decision_wait: 40m' \
+	'decision_wait_after_root_received: 10s' \
+	'num_traces: 5000' \
+	'expected_new_traces_per_sec: 2' \
+	'status_codes: [ERROR]' \
+	'sampling_percentage: 10' \
+	'processors: [filter/metrics, transform/allowlisted_attributes]' \
+	'processors: [filter/logs, transform/allowlisted_attributes]'; do
+	grep -Fq "$field" <<<"$collector_source" || fail "Collector policy field is missing: $field"
+done
+for metric in \
+	http.server.request.count http.server.request.duration \
+	http.client.request.count http.client.request.duration \
+	cache.operation.count cache.operation.duration \
+	lineage.synchronization.duration lineage.synchronization.activated \
+	lineage.failed_resource.count lineage.active.age; do
+	grep -Fq "\"$metric\"" <<<"$collector_source" || fail "Collector metric allowlist is missing $metric"
+done
+for message in \
+	'synchronization started' 'outbound acquisition completed' 'lineage activated' \
+	'previous lineage evicted' 'synchronization completed' 'oversized thread detected' \
+	'synchronization tick skipped'; do
+	grep -Fq "log.body != \"$message\"" <<<"$collector_source" || fail "Collector log allowlist is missing $message"
+done
+[[ "$(grep -Fc 'enabled: false' <<<"$collector_source")" -eq 6 ]] || fail 'Collector retries and queues are not all disabled'
+if grep -Eq '65104|OTEL_EXPORTER_OTLP_ENDPOINT|FOURVISOR_OTLP_EXPORT_ENDPOINT|^[[:space:]]+http:|file_storage|filelog|^[[:space:]]+file/' <<<"$collector_source"; then
 	fail 'Collector config contains the removed HTTP listener or project-prefixed endpoint'
 fi
 
@@ -276,11 +361,14 @@ port_inventory="$(
 )"
 [[ "$port_inventory" == $'65100\n65101\n65102\n65103\n65199' ]] || fail "deployment port inventory is: ${port_inventory//$'\n'/, }"
 
-for name in "$edge_name" "$collector_name"; do
+for name in "$edge_name" "$collector_name" "$capture_name" "$policy_name"; do
 	if docker container inspect "$name" >/dev/null 2>&1; then
 		fail "validation container name already exists: $name"
 	fi
 done
+if docker network inspect "$policy_network" >/dev/null 2>&1; then
+	fail "validation network name already exists: $policy_network"
+fi
 
 docker container create \
 	--cidfile "$edge_cidfile" \
@@ -350,11 +438,100 @@ docker container create \
 	--cidfile "$collector_cidfile" \
 	--name "$collector_name" \
 	--network none \
-	--env OTEL_EXPORTER_OTLP_ENDPOINT=collector.invalid:65103 \
+	--env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=traces.invalid:65103 \
+	--env OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=metrics.invalid:65103 \
+	--env OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=logs.invalid:65103 \
 	--mount "type=bind,src=$project_root/otel-collector.yaml,dst=/etc/otelcol-contrib/config.yaml,readonly" \
 	"$collector_image" \
 	validate --config=/etc/otelcol-contrib/config.yaml >/dev/null
 collector_id="$(container_id_from_file "$collector_cidfile")" || fail 'Collector validation container ID was not recorded safely'
 docker container start --attach "$collector_id"
+
+mkdir --mode=0777 "$capture_output"
+chmod 0777 "$capture_output"
+cat >"$capture_config" <<'EOF'
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:65103
+
+exporters:
+  file/traces:
+    path: /output/traces.json
+    format: json
+    flush_interval: 100ms
+  file/metrics:
+    path: /output/metrics.json
+    format: json
+    flush_interval: 100ms
+  file/logs:
+    path: /output/logs.json
+    format: json
+    flush_interval: 100ms
+
+service:
+  telemetry:
+    metrics:
+      level: none
+      readers: []
+  pipelines:
+    traces:
+      receivers: [otlp]
+      exporters: [file/traces]
+    metrics:
+      receivers: [otlp]
+      exporters: [file/metrics]
+    logs:
+      receivers: [otlp]
+      exporters: [file/logs]
+EOF
+chmod 0644 "$capture_config"
+
+docker network create "$policy_network" >/dev/null
+docker container create \
+	--cidfile "$capture_cidfile" \
+	--name "$capture_name" \
+	--network "$policy_network" \
+	--network-alias capture \
+	--publish 127.0.0.1:65195:65103 \
+	--mount "type=bind,src=$capture_config,dst=/etc/otelcol-contrib/config.yaml,readonly" \
+	--mount "type=bind,src=$capture_output,dst=/output" \
+	"$collector_image" \
+	--config=/etc/otelcol-contrib/config.yaml >/dev/null
+capture_id="$(container_id_from_file "$capture_cidfile")" || fail 'capture Collector container ID was not recorded safely'
+
+docker container create \
+	--cidfile "$policy_cidfile" \
+	--name "$policy_name" \
+	--network "$policy_network" \
+	--publish 127.0.0.1:65196:65103 \
+	--env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=capture:65103 \
+	--env OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=capture:65103 \
+	--env OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=capture:65103 \
+	--mount "type=bind,src=$project_root/otel-collector.yaml,dst=/etc/otelcol-contrib/config.yaml,readonly" \
+	"$collector_image" \
+	--config=/etc/otelcol-contrib/config.yaml >/dev/null
+policy_id="$(container_id_from_file "$policy_cidfile")" || fail 'policy Collector container ID was not recorded safely'
+
+docker container start "$capture_id" >/dev/null
+if ! wait_for_loopback_port 65195; then
+	docker container logs "$capture_id" >&2 || true
+	fail 'capture Collector did not become ready'
+fi
+docker container start "$policy_id" >/dev/null
+if ! wait_for_loopback_port 65196; then
+	docker container logs "$policy_id" >&2 || true
+	fail 'policy Collector did not become ready'
+fi
+
+(
+	cd "$project_root/backend"
+	FOURVISOR_TEST_COLLECTOR_ENDPOINT=http://127.0.0.1:65196 \
+		FOURVISOR_TEST_COLLECTOR_TRACES_OUTPUT="$captured_traces" \
+		FOURVISOR_TEST_COLLECTOR_METRICS_OUTPUT="$captured_metrics" \
+		FOURVISOR_TEST_COLLECTOR_LOGS_OUTPUT="$captured_logs" \
+		go test -v -count=1 -run '^TestCollectorSignalPolicies$' ./telemetry
+)
 
 printf 'Compose deployment configuration validation passed.\n'

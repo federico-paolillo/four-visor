@@ -17,6 +17,7 @@ import (
 	"github.com/oklog/ulid/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
+	metricnoop "go.opentelemetry.io/otel/metric/noop"
 	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
@@ -178,6 +179,36 @@ func TestSynchronizationOutcomeTelemetry(t *testing.T) {
 				}
 			})
 		})
+	}
+}
+
+func TestSynchronizationExporterFailureDoesNotChangeActivation(t *testing.T) {
+	provider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(synchronizationFailingExporter{}))
+	t.Cleanup(func() { _ = provider.Shutdown(t.Context()) })
+	published := false
+	scheduler, err := newScheduler(time.Hour, 10, schedulerDependencies{
+		observe: func(context.Context) (snapshot.Boards, error) {
+			return boardsWithFailures(0), nil
+		},
+		publish: func(context.Context, snapshot.Snapshot, time.Duration) error {
+			published = true
+
+			return nil
+		},
+		logger:         slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		tracer:         provider.Tracer("test/synchronization"),
+		meter:          metricnoop.NewMeterProvider().Meter("test/synchronization"),
+		jitterEntropy:  bytes.NewReader([]byte{0}),
+		lineageEntropy: bytes.NewReader(make([]byte, 32)),
+		deadline:       time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("newScheduler() error = %v", err)
+	}
+
+	scheduler.synchronize(t.Context())
+	if !published || scheduler.activeObservedAt.Load() == 0 {
+		t.Fatalf("export failure changed synchronization: published=%v active=%d", published, scheduler.activeObservedAt.Load())
 	}
 }
 
@@ -493,4 +524,14 @@ func boardsWithFailures(count int) snapshot.Boards {
 	}
 
 	return snapshot.Boards{State: snapshot.StatePresent, Items: &items}
+}
+
+type synchronizationFailingExporter struct{}
+
+func (synchronizationFailingExporter) ExportSpans(context.Context, []tracesdk.ReadOnlySpan) error {
+	return errors.New("collector unavailable")
+}
+
+func (synchronizationFailingExporter) Shutdown(context.Context) error {
+	return nil
 }

@@ -20,7 +20,9 @@ run = '''
 set -eu
 compose() {
   FOURVISOR_COMMIT_HASH=0000000000000000000000000000000000000000 \
-    OTEL_EXPORTER_OTLP_ENDPOINT=collector.invalid:65103 \
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=collector.invalid:65103 \
+    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=collector.invalid:65103 \
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=collector.invalid:65103 \
     docker compose -p four-visor-test -f ../docker-compose.yml -f ../docker-compose.test.yml "$@"
 }
 cleanup() {

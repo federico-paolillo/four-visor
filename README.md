@@ -366,10 +366,12 @@ Memcached and Collector have no host publication. Edge strips `/api` before
 proxying `/api/*` to the backend, so `/api/snapshot` becomes `/snapshot` and
 `/api/health` becomes `/health`; every other path goes to frontend Caddy.
 
-Copy the environment template and fill both required values. The commit must be
-the full lowercase hash of the checked-out deployment. The Collector endpoint
-is required by its existing native configuration; do not put credentials in the
-tracked example.
+Copy the environment template and fill its four required values. The commit
+must be the full lowercase hash of the checked-out deployment. Set
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and
+`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` to the respective OTLP/gRPC destination in
+`host:port` form; the three values may point to the same destination. Do not put
+credentials in the tracked example.
 
 ```sh
 cp .env.example .env
@@ -383,7 +385,8 @@ remain authoritative. The Compose deployment does not pass through
 `FOURVISOR_SERVER_ADDRESS`; its backend listener is fixed to `:65102` to match
 edge routing and the healthcheck. Memcached, Caddy and Collector use their native
 command, file and environment configuration; the Collector receives
-`OTEL_EXPORTER_OTLP_ENDPOINT`, never a project-prefixed replacement.
+the three signal-specific native exporter variables above, never a
+project-prefixed replacement.
 
 Validate configuration, pull only the three upstream images, build the two
 first-party images locally, then start the project without another build:
@@ -426,6 +429,82 @@ after loss, snapshot requests return `410 Gone` until the next ordinary
 scheduled backend synchronization reconstructs and activates a lineage. Do not
 add a persistent cache, manual or client-triggered acquisition, replicas,
 failover, wait-for orchestration or firewall rules as a recovery mechanism.
+
+### Observability operations
+
+The backend sends always-sampled OTLP to the internal Collector; sampling is
+deferred to its tail policy. The Collector retains every trace containing an
+`ERROR` span and approximately 10% of otherwise successful traces. Inbound
+roots are `GET /health` and `GET /snapshot`; the scheduled root is
+`lineage.synchronize`. Their applicable children are `health.memcached`,
+`health.dns`, `active-lineage.lookup`, `lineage.completion.read`,
+`lineage.block.read`, `serialize.snapshot`, `lineage.acquire`, `fetch.boards`,
+`fetch.catalog`, `fetch.thread`, `lineage.publish`, `lineage.validate`,
+`lineage.activate`, `lineage.evict.previous` and `memcached.get|add|set|delete`.
+Lineage ULIDs are diagnostic trace/log attributes, never metric labels; spans
+do not record raw URLs, cache keys, payloads or error messages.
+
+Only these metrics and datapoint attributes are exported; the sole metric
+resource attribute is `service.name=four-visor-backend`.
+
+| Metric | Kind / unit | Allowed datapoint attributes |
+| --- | --- | --- |
+| `http.server.request.count` | monotonic sum / none | `http.request.method`, `http.route`, `http.response.status_code` |
+| `http.server.request.duration` | histogram / `s` | `http.request.method`, `http.route`, `http.response.status_code` |
+| `http.client.request.count` | monotonic sum / none | `resource.type`, `error.type`, `http.response.status_code` |
+| `http.client.request.duration` | histogram / `s` | `resource.type`, `error.type`, `http.response.status_code` |
+| `cache.operation.count` | monotonic sum / none | `cache.operation`, `cache.outcome` |
+| `cache.operation.duration` | histogram / `s` | `cache.operation`, `cache.outcome` |
+| `lineage.synchronization.duration` | histogram / `s` | `lineage.outcome` |
+| `lineage.synchronization.activated` | monotonic sum / none | `lineage.outcome` |
+| `lineage.failed_resource.count` | histogram / `{resource}` | none |
+| `lineage.active.age` | gauge / `s` | none |
+
+Server methods are standard HTTP verbs or `_OTHER`; routes are `/health`,
+`/snapshot` or `unmatched`. Client resource types are `boards`, `catalog` and
+`thread`; client error types are `none`, `network`, `timeout`, `rate_limited`,
+`http`, `invalid_response`, `lineage_deadline` and `canceled`. Cache operations
+are `add`, `set`, `get` and `delete`, with `success`, `hit`, `miss` or `error`
+outcomes. Lineage outcomes are `success`, `degraded` and `failed`. Board,
+thread, post and lineage identifiers, raw URLs and error messages are removed
+from metrics; `lineage.synchronization.activated` emits only `success` or
+`degraded`.
+
+All `ERROR` logs are retained. The only retained lower-severity records are
+`synchronization started`, `outbound acquisition completed`,
+`lineage activated`, `previous lineage evicted`, `synchronization completed`,
+`oversized thread detected` and `synchronization tick skipped`. Their allowed
+record attributes are `dependency`, `scheduler.reason`, `lineage.id`,
+`lineage.observed_at`, `lineage.outcome`, `lineage.degradation.excessive`,
+`resource.type`, `resource.state`, `resource.board.count`,
+`resource.catalog.count`, `resource.thread.count`, `resource.failed.count`,
+`resource.failed.tolerance`, `posts.limit`, `error.type` and
+`error.cause.type`. Routine successful request, outbound request, cache GET and
+cache-hit chatter is dropped. Caddy and third-party container stdout is not an
+OTLP input.
+
+To find an excessive-degradation trace, search retained logs for its
+`lineage.id`, take the native trace ID from the matching
+`excessively degraded lineage activated` error record, then query that trace in
+the configured trace destination. Exporters use the three signal-specific
+destinations above as plaintext OTLP/gRPC, with a five-second timeout, no
+retry, no sending queue and no persistent storage; an outage loses telemetry
+but does not change health, snapshot or synchronization results.
+
+This is a single-node, personal-grade path. Collector restart loses pending
+tail decisions; the in-memory tail budget is 5,000 traces with a 40-minute
+maximum wait and a 10-second completed-root acceleration. Overflow, later
+spans or traces exceeding that window can be incomplete, and small successful
+samples need not equal exactly 10%. It provides diagnostics, not audit
+completeness, analytics, alerts or SLO guarantees.
+
+For trouble, first run `mise run compose:validate`; then confirm the backend
+uses `FOURVISOR_OTLP_ENDPOINT=http://otelcol:65103`, inspect backend and
+Collector logs with `docker compose logs backend otelcol`, and verify each
+configured signal destination is reachable from the Collector network. If
+application responses remain correct while telemetry is absent, diagnose the
+Collector or destination rather than changing application health or
+synchronization logic.
 
 ## Verification
 

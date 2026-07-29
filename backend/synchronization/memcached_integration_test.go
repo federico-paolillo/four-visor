@@ -22,6 +22,8 @@ import (
 	"github.com/bradfitz/gomemcache/memcache"
 	"go.opentelemetry.io/otel/codes"
 	metricnoop "go.opentelemetry.io/otel/metric/noop"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
@@ -34,6 +36,8 @@ func TestSynchronizationRealAcquisitionAndMemcachedOutcomes(t *testing.T) {
 		wantBoards  snapshot.State
 		wantCatalog snapshot.State
 		wantOutcome string
+		failed      bool
+		wantThread  bool
 	}{
 		{
 			name: "complete",
@@ -42,7 +46,9 @@ func TestSynchronizationRealAcquisitionAndMemcachedOutcomes(t *testing.T) {
 				case "/boards.json":
 					_, _ = io.WriteString(writer, `{"boards":[{"board":"a"}]}`)
 				case "/a/catalog.json":
-					_, _ = io.WriteString(writer, `[]`)
+					_, _ = io.WriteString(writer, `[{"page":1,"threads":[{"no":1}]}]`)
+				case "/a/thread/1.json":
+					_, _ = io.WriteString(writer, `{"posts":[{"no":1}]}`)
 				default:
 					http.NotFound(writer, request)
 				}
@@ -50,6 +56,7 @@ func TestSynchronizationRealAcquisitionAndMemcachedOutcomes(t *testing.T) {
 			wantBoards:  snapshot.StatePresent,
 			wantCatalog: snapshot.StatePresent,
 			wantOutcome: outcomeSuccess,
+			wantThread:  true,
 		},
 		{
 			name: "degraded catalog",
@@ -64,6 +71,7 @@ func TestSynchronizationRealAcquisitionAndMemcachedOutcomes(t *testing.T) {
 			wantBoards:  snapshot.StatePresent,
 			wantCatalog: snapshot.StateFailed,
 			wantOutcome: outcomeDegraded,
+			failed:      true,
 		},
 		{
 			name: "total outage",
@@ -72,6 +80,7 @@ func TestSynchronizationRealAcquisitionAndMemcachedOutcomes(t *testing.T) {
 			}),
 			wantBoards:  snapshot.StateFailed,
 			wantOutcome: outcomeDegraded,
+			failed:      true,
 		},
 	}
 
@@ -83,7 +92,11 @@ func TestSynchronizationRealAcquisitionAndMemcachedOutcomes(t *testing.T) {
 			harness := newTelemetryHarness(t)
 			publisher := integrationPublisher(t, address, harness)
 			publishOldLineage(t, publisher)
+			harness.spans.Reset()
 			scheduler := integrationScheduler(t, server, publisher, harness, 5*time.Second, time.Hour)
+			if test.failed {
+				scheduler.tolerance = 0
+			}
 
 			scheduler.synchronize(t.Context())
 			active := readActiveSnapshot(t, address, http.StatusOK)
@@ -100,6 +113,7 @@ func TestSynchronizationRealAcquisitionAndMemcachedOutcomes(t *testing.T) {
 			if got := spanAttribute(root.Attributes, "lineage.outcome"); got != test.wantOutcome {
 				t.Fatalf("root outcome = %q, want %q", got, test.wantOutcome)
 			}
+			assertRealSynchronizationTopology(t, harness.spans.GetSpans(), root, test.failed, test.wantThread)
 		})
 	}
 }
@@ -506,11 +520,100 @@ func completeUpstream() http.Handler {
 		case "/boards.json":
 			_, _ = io.WriteString(writer, `{"boards":[{"board":"a"}]}`)
 		case "/a/catalog.json":
-			_, _ = io.WriteString(writer, `[]`)
+			_, _ = io.WriteString(writer, `[{"page":1,"threads":[{"no":1}]}]`)
+		case "/a/thread/1.json":
+			_, _ = io.WriteString(writer, `{"posts":[{"no":1}]}`)
 		default:
 			http.NotFound(writer, request)
 		}
 	})
+}
+
+func assertRealSynchronizationTopology(
+	t *testing.T,
+	spans tracetest.SpanStubs,
+	root tracetest.SpanStub,
+	failed, wantThread bool,
+) {
+	t.Helper()
+	type observedSpan struct {
+		id     trace.SpanID
+		parent trace.SpanID
+		status codes.Code
+	}
+	observed := make(map[string][]observedSpan)
+	for _, span := range spans {
+		if span.SpanContext.TraceID() != root.SpanContext.TraceID() {
+			t.Fatalf("span %q trace = %s, want root trace %s", span.Name, span.SpanContext.TraceID(), root.SpanContext.TraceID())
+		}
+		observed[span.Name] = append(observed[span.Name], observedSpan{
+			id: span.SpanContext.SpanID(), parent: span.Parent.SpanID(), status: span.Status.Code,
+		})
+		if strings.HasPrefix(span.Name, "fetch.") || strings.HasPrefix(span.Name, "memcached.") {
+			for _, item := range span.Attributes {
+				if item.Key == "lineage.id" || item.Key == "url.full" || item.Key == "error.message" {
+					t.Fatalf("span %q has forbidden diagnostic attribute %q", span.Name, item.Key)
+				}
+			}
+		}
+	}
+	if len(observed["lineage.synchronize"]) != 1 {
+		t.Fatalf("synchronization roots = %d, want 1", len(observed["lineage.synchronize"]))
+	}
+	requireChild := func(name string, parents ...string) {
+		t.Helper()
+		children := observed[name]
+		if len(children) == 0 {
+			t.Fatalf("required span %q missing", name)
+		}
+		validParents := make(map[trace.SpanID]bool)
+		for _, parentName := range parents {
+			for _, parent := range observed[parentName] {
+				validParents[parent.id] = true
+			}
+		}
+		for _, child := range children {
+			if !validParents[child.parent] {
+				t.Fatalf("span %q parent = %s, want one of %v", name, child.parent, parents)
+			}
+		}
+	}
+	requireChild("lineage.acquire", "lineage.synchronize")
+	requireChild("lineage.publish", "lineage.synchronize")
+	requireChild("fetch.boards", "lineage.acquire")
+	if !failed || len(observed["fetch.catalog"]) > 0 {
+		requireChild("fetch.catalog", "lineage.acquire")
+	}
+	if wantThread {
+		requireChild("fetch.thread", "lineage.acquire")
+	}
+	requireChild("lineage.validate", "lineage.publish")
+	requireChild("lineage.activate", "lineage.publish")
+	requireChild("lineage.evict.previous", "lineage.publish")
+	requireChild("memcached.get", "lineage.publish", "lineage.activate")
+	requireChild("memcached.add", "lineage.publish")
+	requireChild("memcached.set", "lineage.activate")
+	requireChild("memcached.delete", "lineage.evict.previous")
+
+	if failed {
+		if root.Status.Code != codes.Error {
+			t.Fatalf("failed synchronization root status = %v, want error", root.Status)
+		}
+		fetchError := false
+		for name, items := range observed {
+			if !strings.HasPrefix(name, "fetch.") {
+				continue
+			}
+			for _, item := range items {
+				fetchError = fetchError || item.status == codes.Error
+			}
+		}
+		if !fetchError {
+			t.Fatal("failed synchronization has no error fetch child")
+		}
+	} else if root.Status.Code != codes.Unset {
+		t.Fatalf("successful synchronization root status = %v", root.Status)
+	}
 }
 
 func blockingUpstream() http.Handler {

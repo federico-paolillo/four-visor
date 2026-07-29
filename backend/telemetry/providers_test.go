@@ -75,4 +75,9 @@ func TestNewNeutralizesAmbientOTelConfiguration(t *testing.T) {
 	if got := os.Getenv("FOURVISOR_TEST_SENTINEL"); got != "preserved" {
 		t.Fatalf("FOURVISOR_ setting = %q, want preserved", got)
 	}
+	_, span := providers.Tracer.Tracer("test/providers").Start(t.Context(), "always-on")
+	if !span.IsRecording() || !span.SpanContext().IsSampled() {
+		t.Fatalf("hostile sampler changed always-on span: recording=%v context=%v", span.IsRecording(), span.SpanContext())
+	}
+	span.End()
 }

@@ -246,6 +246,40 @@ func TestSnapshotHandlerWriteFailureIsTelemetryOnly(t *testing.T) {
 	}
 }
 
+func TestSnapshotExporterFailureDoesNotChangeResponse(t *testing.T) {
+	data := mustMarshalSnapshot(t, testSnapshot(newLineageID, 0))
+	cache := newFakeMemcache()
+	seedSerializedLineage(t, cache, newLineageID, data)
+	provider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(snapshotFailingExporter{}))
+	t.Cleanup(func() { _ = provider.Shutdown(t.Context()) })
+	handler, err := newSnapshotHandler(
+		cache,
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		provider.Tracer("test/snapshot"),
+		metricnoop.NewMeterProvider().Meter("test/snapshot"),
+	)
+	if err != nil {
+		t.Fatalf("newSnapshotHandler() error = %v", err)
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/snapshot", handler)
+	instrumented, err := telemetry.HTTPHandler(
+		mux,
+		provider,
+		metricnoop.NewMeterProvider(),
+		propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}),
+	)
+	if err != nil {
+		t.Fatalf("telemetry.HTTPHandler() error = %v", err)
+	}
+
+	response := httptest.NewRecorder()
+	instrumented.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/snapshot", http.NoBody))
+	if response.Code != http.StatusOK || !bytes.Equal(response.Body.Bytes(), data) {
+		t.Fatalf("response after export failure: status=%d body=%s", response.Code, response.Body)
+	}
+}
+
 func TestSnapshotTelemetryUsesExistingServerRootAndBoundedMetrics(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	tracerProvider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(exporter))
@@ -295,17 +329,21 @@ func TestSnapshotTelemetryUsesExistingServerRootAndBoundedMetrics(t *testing.T) 
 	}
 
 	spans := exporter.GetSpans()
-	serverIDs := make(map[trace.SpanID]codes.Code)
-	semanticIDs := make(map[trace.SpanID]struct{})
+	type spanIdentity struct {
+		traceID trace.TraceID
+		status  codes.Code
+	}
+	serverIDs := make(map[trace.SpanID]spanIdentity)
+	semanticIDs := make(map[trace.SpanID]trace.TraceID)
 	failedBlock := false
 	failedSerialization := false
 	for _, span := range spans {
 		if span.SpanKind == trace.SpanKindServer {
-			serverIDs[span.SpanContext.SpanID()] = span.Status.Code
+			serverIDs[span.SpanContext.SpanID()] = spanIdentity{traceID: span.SpanContext.TraceID(), status: span.Status.Code}
 		}
 		switch span.Name {
 		case "active-lineage.lookup", "lineage.completion.read", "lineage.block.read", "serialize.snapshot":
-			semanticIDs[span.SpanContext.SpanID()] = struct{}{}
+			semanticIDs[span.SpanContext.SpanID()] = span.SpanContext.TraceID()
 			if span.Name == "lineage.block.read" && span.Status.Code == codes.Error {
 				failedBlock = true
 			}
@@ -324,11 +362,13 @@ func TestSnapshotTelemetryUsesExistingServerRootAndBoundedMetrics(t *testing.T) 
 	for _, span := range spans {
 		switch span.Name {
 		case "active-lineage.lookup", "lineage.completion.read", "lineage.block.read", "serialize.snapshot":
-			if _, exists := serverIDs[span.Parent.SpanID()]; !exists {
+			server, exists := serverIDs[span.Parent.SpanID()]
+			if !exists || server.traceID != span.Parent.TraceID() || server.traceID != span.SpanContext.TraceID() {
 				t.Fatalf("semantic span %q parent %v is not a server root", span.Name, span.Parent)
 			}
 		case "memcached.get":
-			if _, exists := semanticIDs[span.Parent.SpanID()]; !exists {
+			semanticTrace, exists := semanticIDs[span.Parent.SpanID()]
+			if !exists || semanticTrace != span.Parent.TraceID() || semanticTrace != span.SpanContext.TraceID() {
 				t.Fatalf("memcached.get parent %v is not a semantic read", span.Parent)
 			}
 		}
@@ -338,8 +378,8 @@ func TestSnapshotTelemetryUsesExistingServerRootAndBoundedMetrics(t *testing.T) 
 			len(serverIDs), failedBlock, failedSerialization, snapshotSpanNames(spans))
 	}
 	var errorRoots int
-	for _, status := range serverIDs {
-		if status == codes.Error {
+	for _, server := range serverIDs {
+		if server.status == codes.Error {
 			errorRoots++
 		}
 	}
@@ -348,6 +388,16 @@ func TestSnapshotTelemetryUsesExistingServerRootAndBoundedMetrics(t *testing.T) 
 	}
 
 	assertSnapshotMetrics(t, reader)
+}
+
+type snapshotFailingExporter struct{}
+
+func (snapshotFailingExporter) ExportSpans(context.Context, []tracesdk.ReadOnlySpan) error {
+	return errors.New("collector unavailable")
+}
+
+func (snapshotFailingExporter) Shutdown(context.Context) error {
+	return nil
 }
 
 type shortResponseWriter struct {
