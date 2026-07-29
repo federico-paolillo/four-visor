@@ -55,6 +55,28 @@ export function sanitizePostMarkup(
   rawHTML: string,
   context: PostMarkupContext,
 ): SanitizedPostMarkup {
+  return sanitizeAndNormalize(rawHTML, context);
+}
+
+// postQuoteNumbers returns only sanitizer-recognized same-thread relationships.
+export function postQuoteNumbers(
+  rawHTML: string,
+  context: PostMarkupContext,
+): readonly number[] {
+  const quotes: number[] = [];
+  try {
+    sanitizeAndNormalize(rawHTML, context, quotes);
+  } catch {
+    return [];
+  }
+  return quotes;
+}
+
+function sanitizeAndNormalize(
+  rawHTML: string,
+  context: PostMarkupContext,
+  quotes?: number[],
+): SanitizedPostMarkup {
   const fragment = DOMPurify.sanitize(rawHTML, {
     ALLOWED_ATTR: ["class", "href"],
     ALLOWED_NAMESPACES: ["http://www.w3.org/1999/xhtml"],
@@ -66,7 +88,7 @@ export function sanitizePostMarkup(
     RETURN_DOM_FRAGMENT: true,
   });
 
-  normalizeElements(fragment, context);
+  normalizeElements(fragment, context, quotes);
   const template = document.createElement("template");
   template.content.append(fragment);
   return template.innerHTML as SanitizedPostMarkup;
@@ -96,6 +118,7 @@ export function PostMarkup({
 function normalizeElements(
   fragment: DocumentFragment,
   context: PostMarkupContext,
+  quotes?: number[],
 ): void {
   for (const element of fragment.querySelectorAll("*")) {
     const sourceClasses = new Set(element.classList);
@@ -111,6 +134,7 @@ function normalizeElements(
           sourceHref,
           sourceClasses.has("quotelink"),
           context,
+          quotes,
         );
         break;
       case "pre":
@@ -137,6 +161,7 @@ function normalizeAnchor(
   sourceHref: string | null,
   quote: boolean,
   context: PostMarkupContext,
+  quotes?: number[],
 ): void {
   const href =
     sourceHref === null || sourceHref.trim() === ""
@@ -147,8 +172,31 @@ function normalizeAnchor(
     return;
   }
 
+  if (quote) {
+    const post = sameThreadQuotePost(href, context);
+    if (post !== undefined) {
+      quotes?.push(post);
+    }
+  }
+
   anchor.setAttribute("class", linkClass);
   anchor.setAttribute("href", href);
+}
+
+function sameThreadQuotePost(
+  href: string,
+  context: PostMarkupContext,
+): number | undefined {
+  const destination = new URL(href);
+  const match = quotePostPattern.exec(destination.hash);
+  if (match === null) {
+    return undefined;
+  }
+
+  const post = Number(match[1]);
+  return href === canonicalPostURL(context.board, context.thread, post)
+    ? post
+    : undefined;
 }
 
 function safeDestination(

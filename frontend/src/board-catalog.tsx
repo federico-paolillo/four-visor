@@ -11,6 +11,7 @@ import type {
   SnapshotV1,
   ThreadEntry,
 } from "./snapshot";
+import { ThreadReader } from "./thread-reader";
 
 const ageRefreshInterval = 60_000;
 const relativeTime = new Intl.RelativeTimeFormat("en", { numeric: "always" });
@@ -267,6 +268,7 @@ function CatalogPanel({
       ) : (
         <PresentCatalog
           board={item.board}
+          boardIndex={itemIndex}
           onSelectPage={onSelectPage}
           onSelectThread={onSelectThread}
           pageIndex={pageIndex}
@@ -280,6 +282,7 @@ function CatalogPanel({
 
 function PresentCatalog({
   board,
+  boardIndex,
   pages,
   pageIndex,
   threadIndex,
@@ -287,6 +290,7 @@ function PresentCatalog({
   onSelectThread,
 }: {
   readonly board: OpaqueObject;
+  readonly boardIndex: number;
   readonly pages: readonly Page[];
   readonly pageIndex: number;
   readonly threadIndex?: number;
@@ -340,7 +344,11 @@ function PresentCatalog({
       )}
 
       {selectedThreadIndex !== undefined && (
-        <SelectedThreadStatus entry={page.threads[selectedThreadIndex]} />
+        <ThreadReader
+          board={board}
+          entry={page.threads[selectedThreadIndex]}
+          key={`${boardIndex}:${pageIndex}:${selectedThreadIndex}`}
+        />
       )}
     </>
   );
@@ -388,35 +396,6 @@ function ThreadRow({
         label={`Open ${threadLabel(entry, index)} on 4chan`}
       />
     </li>
-  );
-}
-
-function SelectedThreadStatus({ entry }: { readonly entry?: ThreadEntry }) {
-  if (entry === undefined || entry.thread === undefined) {
-    return (
-      <ResourceStatus heading="Thread unavailable">
-        Not available in this snapshot
-      </ResourceStatus>
-    );
-  }
-  if (entry.thread.state === "failed") {
-    return (
-      <ResourceStatus heading="Thread failed" degraded>
-        This thread failed during snapshot construction.
-      </ResourceStatus>
-    );
-  }
-  if (entry.thread.state === "oversize") {
-    return (
-      <ResourceStatus heading="Thread truncated" degraded>
-        Only the first 250 observed posts are available in this snapshot.
-      </ResourceStatus>
-    );
-  }
-  return (
-    <ResourceStatus heading="Thread available">
-      This thread is available in the local snapshot.
-    </ResourceStatus>
   );
 }
 

@@ -8,7 +8,11 @@ import { act } from "preact/test-utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { canonicalPostURL } from "./fourchan-url";
-import { PostMarkup, sanitizePostMarkup } from "./post-markup";
+import {
+  PostMarkup,
+  postQuoteNumbers,
+  sanitizePostMarkup,
+} from "./post-markup";
 
 const context = { board: "g", thread: 42 } as const;
 const mountedRoots: Element[] = [];
@@ -238,6 +242,38 @@ describe("canonical quote destinations", () => {
     ] as const) {
       expect(canonicalPostURL(board, thread, post)).toBeUndefined();
     }
+  });
+});
+
+describe("sanitized quote relationships", () => {
+  it("returns only canonical same-thread post numbers in source order", () => {
+    expect(
+      postQuoteNumbers(
+        '<a class="quotelink" href="#p43">first</a>' +
+          '<section><a class="quotelink" href="/g/thread/42#p44">second</a></section>' +
+          '<a class="quotelink" href="/a/thread/42#p45">cross-board</a>' +
+          '<a href="#p46">ordinary link</a>' +
+          '<span class="deadlink">&gt;&gt;47</span>',
+        context,
+      ),
+    ).toEqual([43, 44]);
+  });
+
+  it("drops active-content relationships and fails closed", () => {
+    expect(
+      postQuoteNumbers(
+        '<script><a class="quotelink" href="#p43">hidden</a></script>' +
+          '<a class="quotelink" href="javascript:alert(1)">unsafe</a>',
+        context,
+      ),
+    ).toEqual([]);
+
+    vi.spyOn(DOMPurify, "sanitize").mockImplementationOnce(() => {
+      throw new Error("sanitizer unavailable");
+    });
+    expect(
+      postQuoteNumbers('<a class="quotelink" href="#p43">x</a>', context),
+    ).toEqual([]);
   });
 });
 

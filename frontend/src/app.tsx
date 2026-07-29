@@ -178,7 +178,7 @@ export function App({
               </Status>
             </section>
           )}
-          <BoardCatalog key={snapshot} snapshot={snapshot} />
+          <BoardCatalog key={snapshot.lineageId} snapshot={snapshot} />
         </div>
       </main>
     );

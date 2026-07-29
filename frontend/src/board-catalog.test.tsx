@@ -49,7 +49,7 @@ describe("ordered local catalog browsing", () => {
     expect(host.text()).not.toContain("Failed first");
     await host.click("No. 7 · Second page absent");
     expect(host.text()).toContain(
-      "Thread unavailableNot available in this snapshot",
+      "Thread unavailableNot available in this snapshot.",
     );
 
     await act(() =>
@@ -62,7 +62,7 @@ describe("ordered local catalog browsing", () => {
       ),
     );
     expect(host.text()).toContain(
-      "Thread unavailableNot available in this snapshot",
+      "Thread unavailableNot available in this snapshot.",
     );
     await act(() =>
       render(
@@ -78,7 +78,7 @@ describe("ordered local catalog browsing", () => {
       ),
     );
     expect(host.text()).toContain(
-      "Thread unavailableNot available in this snapshot",
+      "Thread unavailableNot available in this snapshot.",
     );
 
     const sameLineageReplacement = { ...localSnapshot };
@@ -92,12 +92,12 @@ describe("ordered local catalog browsing", () => {
         host.root,
       ),
     );
-    expect(host.text()).toContain("Failed first");
-    expect(host.text()).not.toContain("Thread unavailable");
+    expect(host.text()).not.toContain("Failed first");
+    expect(host.text()).toContain("Thread unavailable");
     expect(
       host.button("/z/ · Last upstream").getAttribute("aria-pressed"),
     ).toBe("true");
-    expect(host.button("Page 2").getAttribute("aria-current")).toBe("page");
+    expect(host.button("Page 1").getAttribute("aria-current")).toBe("page");
     expect(vi.getTimerCount()).toBe(1);
 
     await act(() => render(null, host.root));
@@ -139,7 +139,8 @@ describe("ordered local catalog browsing", () => {
     expect(text(view)).toContain("Thread failed");
     clickButton(view, "No. 8 · Present second");
     view = renderView();
-    expect(text(view)).toContain("Thread available");
+    expect(text(view)).toContain("Thread No. 8");
+    expect(text(view)).toContain("1 stored post");
 
     clickButton(view, "Page 1");
     expect(selection).toEqual({ boardIndex: 0, pageIndex: 1 });
@@ -154,12 +155,12 @@ describe("ordered local catalog browsing", () => {
     expect(selection).toEqual({ boardIndex: 0, pageIndex: 1, threadIndex: 0 });
     view = renderView();
     expect(text(view)).toContain(
-      "Thread unavailableNot available in this snapshot",
+      "Thread unavailableNot available in this snapshot.",
     );
     clickButton(view, "No. 6 · Second page truncated");
     view = renderView();
     expect(text(view)).toContain(
-      "Thread truncatedOnly the first 250 observed posts are available in this snapshot.",
+      "Showing the first 250 posts stored in this snapshot. This thread was truncated; later posts are not available.",
     );
 
     clickButton(view, "/a/ · First alphabetically");
