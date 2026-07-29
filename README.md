@@ -53,11 +53,41 @@ unrelated origin caches and browser-managed HTTP caches untouched.
 
 Cache Storage contains only `index.html`, the Web App Manifest, the two PWA
 icons, and Vite-generated application assets. Snapshot responses and IndexedDB
-records never enter Cache Storage. Snapshot persistence is introduced by later
-stories through IndexedDB. 4chan images, thumbnails, video, audio, and other
-content media are never explicitly cached by 4Visor, although the browser may
-retain them independently in its ordinary HTTP cache. Offline support therefore
-promises the application shell only, not snapshot content or media.
+records never enter Cache Storage. 4chan images, thumbnails, video, audio, and
+other content media are never explicitly cached by 4Visor, although the browser
+may retain them independently in its ordinary HTTP cache. Offline support
+therefore promises the application shell and the last complete local snapshot,
+not media.
+
+### Local snapshot storage and reset
+
+IndexedDB is mandatory and is the exclusive local home for snapshot payloads.
+At startup, 4Visor opens `four-visor-snapshots`, audits its local lineage
+ownership, and loads the active snapshot before any backend request is needed.
+A valid active snapshot becomes available immediately; a fresh installation
+shows an explicit empty state. Unavailable or corrupt IndexedDB produces a
+blocking storage error with no memory-only or online-only fallback.
+
+The database stores at most one active and one inactive incoming lineage. Each
+uses a distinct installation-local key even when both payloads contain the same
+upstream `lineageId`. UTF-8 snapshot documents are stored as ordered 65,536-byte
+records with completion length, count, and SHA-256 metadata. The final record is
+the exact remaining length. Upstream lineage identifiers remain inside payloads
+and never identify local records. Cache Storage remains restricted to the
+application shell; it never contains these payload records.
+
+**Reset local data** asks for destructive confirmation, then deletes the whole
+4Visor IndexedDB database, including active and incoming data and the stable
+installation-local jitter seed. It next deletes every owned
+`four-visor-shell-*` Cache Storage entry after the app's registration attempt
+settles, unregisters only the 4Visor root Service Worker registration, then
+deletes and verifies owned caches again before reloading. A successful online
+reload registers a new worker and
+atomically precaches a fresh application shell, preserving later offline shell
+reopens. Cancellation changes nothing.
+The reset is local to this browser installation and performs no server reset.
+It loses cached snapshot continuity and stable local jitter, but leaves unrelated
+origin caches and the browser-managed HTTP cache untouched.
 
 ### Backend HTTP service
 

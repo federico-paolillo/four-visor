@@ -7,6 +7,7 @@ import {
   fetchShell,
   installShell,
   obsoleteShellCacheNames,
+  ownedShellCacheNames,
   type ShellCacheStorage,
   shellCachePrefix,
   shellRequestKey,
@@ -75,6 +76,16 @@ describe("shell request allowlist", () => {
 });
 
 describe("shell cache cleanup", () => {
+  it("selects every owned cache for local reset", () => {
+    expect(
+      ownedShellCacheNames([
+        `${shellCachePrefix}old-a`,
+        "another-application-cache",
+        currentCache,
+      ]),
+    ).toEqual([`${shellCachePrefix}old-a`, currentCache]);
+  });
+
   it("selects only obsolete owned shell caches", () => {
     expect(
       obsoleteShellCacheNames(

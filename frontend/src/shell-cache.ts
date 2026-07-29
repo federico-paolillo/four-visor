@@ -42,9 +42,14 @@ export function obsoleteShellCacheNames(
   cacheNames: readonly string[],
   currentCacheName: string,
 ): string[] {
-  return cacheNames.filter(
-    (cacheName) =>
-      cacheName.startsWith(shellCachePrefix) && cacheName !== currentCacheName,
+  return ownedShellCacheNames(cacheNames).filter(
+    (cacheName) => cacheName !== currentCacheName,
+  );
+}
+
+export function ownedShellCacheNames(cacheNames: readonly string[]): string[] {
+  return cacheNames.filter((cacheName) =>
+    cacheName.startsWith(shellCachePrefix),
   );
 }
 
