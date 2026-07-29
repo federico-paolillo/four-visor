@@ -25,7 +25,7 @@
 - [x] US-008 Install and reopen the application shell offline
 - [x] US-009 Start from, fail on, or reset local snapshot storage
 - [x] US-010 Replace the local lineage only after complete synchronization
-- [ ] US-011 Refresh with stable installation-local jitter
+- [x] US-011 Refresh with stable installation-local jitter
 - [ ] US-012 Browse ordered boards and compact catalogs from the local lineage
 - [ ] US-013 Render upstream post markup safely with canonical links
 - [ ] US-014 Read nested, collapsible threads with honest degradation

@@ -3,6 +3,10 @@
 import { render } from "preact";
 
 import { App, startApplication } from "./app";
+import {
+  loadOrCreateClientRefreshJitter,
+  runClientRefresh,
+} from "./client-refresh";
 import { resetLocalData } from "./local-reset";
 import { loadActiveSnapshot, replaceActiveSnapshot } from "./snapshot-storage";
 import { synchronizeSnapshot } from "./snapshot-sync";
@@ -15,14 +19,24 @@ if (appEntryPoint === null) {
 
 const rootScope = new URL("/", location.href).href;
 let appRegistration: Promise<unknown> = Promise.resolve();
+let clientRefreshJitter: number | undefined;
+const clientRefresh = new AbortController();
 
 export const applicationController = startApplication({
   confirm: (message) => window.confirm(message),
-  load: () => loadActiveSnapshot(indexedDB, IDBKeyRange, crypto),
+  load: async () => {
+    const snapshot = await loadActiveSnapshot(indexedDB, IDBKeyRange, crypto);
+    clientRefreshJitter = await loadOrCreateClientRefreshJitter(
+      indexedDB,
+      crypto,
+    );
+    return snapshot;
+  },
   render: (state, reset) =>
     render(<App state={state} onReset={reset} />, appEntryPoint),
-  reset: (reportProgress) =>
-    resetLocalData(
+  reset: async (reportProgress) => {
+    clientRefresh.abort();
+    await resetLocalData(
       indexedDB,
       caches,
       "serviceWorker" in navigator ? navigator.serviceWorker : undefined,
@@ -30,7 +44,8 @@ export const applicationController = startApplication({
       () => location.reload(),
       reportProgress,
       appRegistration,
-    ),
+    );
+  },
   synchronize: (signal) =>
     synchronizeSnapshot(signal, fetch, (serialized, ownerSignal) =>
       replaceActiveSnapshot(
@@ -41,6 +56,17 @@ export const applicationController = startApplication({
         crypto,
       ),
     ),
+});
+
+void applicationController.then((controller) => {
+  if (clientRefreshJitter !== undefined) {
+    void runClientRefresh(
+      clientRefreshJitter,
+      controller.synchronizeWhenDue,
+      clientRefresh.signal,
+      navigator.locks,
+    );
+  }
 });
 
 if (import.meta.env.PROD && "serviceWorker" in navigator) {

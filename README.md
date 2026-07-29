@@ -115,6 +115,32 @@ requires freeing site storage or resetting local data, which also loses offline
 snapshot continuity and the installation-local jitter seed. Snapshot responses
 and records remain outside Service Worker Cache Storage.
 
+### Client refresh schedule
+
+On first activation, the client generates a private one-byte seed with the
+browser cryptographic random-number generator and stores it under `jitter-seed`
+in the existing IndexedDB settings store. Rejection sampling gives each
+integer-second offset from 5 through 60 seconds equal probability. Reloads reuse
+the stored seed; **Reset local data** deletes it with the rest of the database,
+so the next activation generates a new offset. The seed is never added to a
+snapshot request, log, or telemetry signal.
+
+Let `A` be the monotonic time when successful startup has rendered its initial
+local state, `J` the derived offset, and `I` one hour. The first due time is
+`D0 = A + J`; later due times are `Dn = D0 + nI`. Jitter establishes the phase
+once and is not added to each interval. After an attempt succeeds or fails, or
+another tab holds the refresh lock, the client selects the first `Dn` strictly
+after completion. Delayed and overlapping ticks are discarded rather than
+replayed, queued, or retried immediately.
+
+Each due cadence uses an origin-wide exclusive Web Lock in non-waiting
+`ifAvailable` mode. One tab therefore performs the complete synchronization
+while another skips that cadence. The existing local lineage remains readable
+through timer waits and synchronization. Confirmed reset cancels the timer or
+active request before deleting IndexedDB; each reload otherwise starts a new
+monotonic schedule with the same persisted offset rather than persisting timer
+history.
+
 ### Backend HTTP service
 
 The backend serves internal `GET /health` and `GET /snapshot`; the edge maps

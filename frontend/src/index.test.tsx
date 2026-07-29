@@ -8,9 +8,11 @@ import { resetConfirmationText } from "./local-reset";
 import { shellCachePrefix } from "./shell-cache";
 import {
   encodeLineageRecords,
+  jitterSeedKey,
   lineageMetadataStoreName,
   lineageRecordsStoreName,
   openSnapshotDatabase,
+  settingsStoreName,
   snapshotDatabaseName,
 } from "./snapshot-storage";
 
@@ -29,6 +31,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
   vi.unstubAllGlobals();
@@ -117,6 +120,44 @@ describe("production browser entry", () => {
     });
   });
 
+  it("automatically refreshes at the persisted first due time without exposing the seed", async () => {
+    const factory = new IDBFactory();
+    await putSeed(factory, new Uint8Array([0]));
+    const browser = installBrowser(factory, false);
+    browser.fetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
+          observedAt: "2026-07-26T12:00:00Z",
+          boards: { state: "failed" },
+        }),
+      ),
+    );
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
+
+    const entry = await import("./index");
+    await entry.applicationController;
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(browser.fetch).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(browser.fetch).toHaveBeenCalledOnce();
+    expect(browser.fetch).toHaveBeenCalledWith("/api/snapshot", {
+      cache: "no-store",
+      method: "GET",
+      signal: expect.any(AbortSignal),
+    });
+    expect(browser.locks.request).toHaveBeenCalledWith(
+      "four-visor-snapshot-refresh",
+      { ifAvailable: true, mode: "exclusive" },
+      expect.any(Function),
+    );
+
+    await vi.waitFor(() => expect(latestState().kind).toBe("ready"));
+    await latestReset()();
+  });
+
   it("waits for its pending production registration before reset cleanup", async () => {
     const pending = deferred<ServiceWorkerRegistration>();
     const factory = new IDBFactory();
@@ -160,6 +201,22 @@ describe("production browser entry", () => {
       cause,
     );
     expect(latestState()).toEqual({ kind: "empty" });
+  });
+
+  it("renders corrupt storage and does not schedule when the persisted seed is invalid", async () => {
+    const factory = new IDBFactory();
+    await putSeed(factory, new Uint8Array([224]));
+    const browser = installBrowser(factory, false);
+
+    await import("./index");
+    await vi.waitFor(() => expect(latestState().kind).toBe("storage-error"));
+
+    expect(latestState()).toMatchObject({
+      kind: "storage-error",
+      error: { kind: "corrupt" },
+    });
+    expect(browser.fetch).not.toHaveBeenCalled();
+    expect(browser.locks.request).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -211,6 +268,23 @@ function installBrowser(factory: IDBFactory, production: boolean) {
   const confirm = vi.fn(() => true);
   const fetch = vi.fn();
   const reload = vi.fn();
+  const locks = {
+    request: vi.fn(
+      async (
+        _name: string,
+        _options: LockOptions,
+        callback: (lock: Lock) => Promise<void>,
+      ) => {
+        if (_options.ifAvailable && _options.signal !== undefined) {
+          throw new DOMException(
+            "ifAvailable and signal cannot be combined",
+            "NotSupportedError",
+          );
+        }
+        return callback({ mode: "exclusive", name: "refresh" });
+      },
+    ),
+  };
 
   vi.stubEnv("PROD", production);
   vi.stubGlobal("caches", {
@@ -227,13 +301,14 @@ function installBrowser(factory: IDBFactory, production: boolean) {
   vi.stubGlobal("IDBKeyRange", IDBKeyRange);
   vi.stubGlobal("indexedDB", factory);
   vi.stubGlobal("location", { href: origin, reload });
-  vi.stubGlobal("navigator", { serviceWorker });
+  vi.stubGlobal("navigator", { locks, serviceWorker });
   vi.stubGlobal("window", { confirm });
 
   return {
     cacheNames: () => [...cacheNames],
     confirm,
     fetch,
+    locks,
     register,
     registration,
     reload,
@@ -286,6 +361,15 @@ async function seedActive(factory: IDBFactory): Promise<void> {
   for (const record of encoded.records) {
     transaction.objectStore(lineageRecordsStoreName).put(record);
   }
+  await done;
+  database.close();
+}
+
+async function putSeed(factory: IDBFactory, seed: Uint8Array): Promise<void> {
+  const database = await openSnapshotDatabase(factory);
+  const transaction = database.transaction(settingsStoreName, "readwrite");
+  const done = transactionDone(transaction);
+  transaction.objectStore(settingsStoreName).put(seed, jitterSeedKey);
   await done;
   database.close();
 }
