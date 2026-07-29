@@ -26,7 +26,7 @@
 - [x] US-009 Start from, fail on, or reset local snapshot storage
 - [x] US-010 Replace the local lineage only after complete synchronization
 - [x] US-011 Refresh with stable installation-local jitter
-- [ ] US-012 Browse ordered boards and compact catalogs from the local lineage
+- [x] US-012 Browse ordered boards and compact catalogs from the local lineage
 - [ ] US-013 Render upstream post markup safely with canonical links
 - [ ] US-014 Read nested, collapsible threads with honest degradation
 - [ ] US-015 Load media directly and only with the required user intent

@@ -2,6 +2,7 @@
 
 import type { ComponentChildren } from "preact";
 
+import { BoardCatalog } from "./board-catalog";
 import {
   LocalResetError,
   type LocalResetProgress,
@@ -141,6 +142,48 @@ export function App({
   readonly onReset: () => Promise<void>;
 }) {
   const presentation = applicationPresentation(state);
+  const snapshot = visibleSnapshot(state);
+
+  if (snapshot !== undefined) {
+    return (
+      <main class="min-h-screen bg-slate-950 px-4 py-6 text-slate-100 sm:px-6 sm:py-8">
+        <div class="mx-auto w-full max-w-7xl">
+          <header class="sm:flex sm:items-start sm:justify-between sm:gap-6">
+            <div>
+              <p class="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-400">
+                Read-only · Anonymous
+              </p>
+              <h1 class="mt-2 text-3xl font-bold tracking-tight sm:text-4xl">
+                4Visor
+              </h1>
+            </div>
+            {presentation.reset !== "hidden" && (
+              <button
+                class="mt-4 rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 disabled:cursor-wait disabled:opacity-50 sm:mt-0"
+                disabled={presentation.reset === "disabled"}
+                onClick={() => void onReset()}
+                type="button"
+              >
+                {presentation.resetLabel}
+              </button>
+            )}
+          </header>
+          {state.kind !== "ready" && (
+            <section
+              class="mt-6 rounded-xl border border-slate-700 bg-slate-900 p-4"
+              role={presentation.role}
+            >
+              <Status heading={presentation.heading}>
+                {presentation.message}
+              </Status>
+            </section>
+          )}
+          <BoardCatalog key={snapshot} snapshot={snapshot} />
+        </div>
+      </main>
+    );
+  }
+
   return (
     <main class="flex min-h-screen items-center justify-center bg-slate-950 px-6 py-12 text-slate-100">
       <section
@@ -154,7 +197,7 @@ export function App({
         <Status heading={presentation.heading}>{presentation.message}</Status>
         {presentation.reset !== "hidden" && (
           <button
-            class="mt-6 rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950 disabled:cursor-wait disabled:opacity-50"
+            class="mt-6 rounded-lg bg-cyan-500 px-4 py-2 font-semibold text-slate-950 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-400 disabled:cursor-wait disabled:opacity-50"
             disabled={presentation.reset === "disabled"}
             onClick={() => void onReset()}
             type="button"
@@ -165,6 +208,17 @@ export function App({
       </section>
     </main>
   );
+}
+
+function visibleSnapshot(state: ApplicationState): SnapshotV1 | undefined {
+  switch (state.kind) {
+    case "ready":
+    case "synchronizing":
+    case "synchronization-error":
+      return state.snapshot;
+    default:
+      return undefined;
+  }
 }
 
 // startApplication runs the exact production startup and reset state machine.
