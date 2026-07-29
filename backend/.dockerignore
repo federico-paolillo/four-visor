@@ -1,0 +1,7 @@
+.dockerignore
+.gitignore
+.golangci.yml
+Dockerfile
+**/*_test.go
+*.out
+four-visor

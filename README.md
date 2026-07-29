@@ -293,6 +293,61 @@ FOURVISOR_COMMIT_HASH="$(git rev-parse HEAD)" \
 go run ./cmd/app
 ```
 
+## First-party images
+
+The backend and frontend images support Linux amd64 only. Build them through a
+rootless Docker daemon without `sudo`; both builds reject any other target:
+
+```sh
+docker build --platform=linux/amd64 -t four-visor-backend:local backend
+docker build --platform=linux/amd64 -t four-visor-frontend:local frontend
+```
+
+Both final images use the numeric user `65532:65532`, have no shell or build
+toolchain, and require a read-only root filesystem. They require no volume,
+writable mount or tmpfs. The backend exposes its Go server directly on port
+`65102`; the frontend Caddy serves only the built PWA shell and static assets on
+port `65101`. Frontend Caddy does not proxy `/api`, compress responses, manage
+TLS, expose an admin API or persist runtime configuration.
+
+The backend requires `FOURVISOR_MEMCACHED_ADDRESS` and
+`FOURVISOR_COMMIT_HASH`; the environment table above documents its remaining
+optional settings. A network-reachable Memcached is required for health,
+snapshot serving and synchronization, although the process does not connect to
+it during startup. OpenTelemetry exports are asynchronous: Collector
+unavailability may lose telemetry but does not stop or change backend
+processing. DNS and 4chan availability affect health checks and scheduled
+acquisition respectively, not process startup. For example, with the required
+services already present on an operator-managed internal network:
+
+```sh
+docker run --rm --read-only \
+  --network four-visor-internal \
+  --publish 127.0.0.1:65102:65102 \
+  --env FOURVISOR_MEMCACHED_ADDRESS=memcached:65100 \
+  --env FOURVISOR_OTLP_ENDPOINT=http://otelcol:65103 \
+  --env FOURVISOR_COMMIT_HASH="$(git rev-parse HEAD)" \
+  four-visor-backend:local
+
+docker run --rm --read-only \
+  --publish 127.0.0.1:65101:65101 \
+  four-visor-frontend:local
+```
+
+These loopback publications are local operator examples, not the production
+topology. US-017 owns the private service network, edge routing and ingress;
+ingress alone owns TLS and Brotli compression. Memcached, the OpenTelemetry
+Collector, edge Caddy and other third-party images remain their upstream images
+and are not rebuilt to impose first-party controls.
+
+Run `mise run images:validate` to execute the backend and frontend gates, build
+both images, inspect their metadata and contents, validate the Caddyfile, and
+start each process briefly with `--network none --read-only`. This is artifact
+integration validation: it publishes no port and makes no HTTP or health probe.
+A cold run needs access to the configured container registries, Go module proxy
+and npm registry and may take 15–30 minutes; cached runs usually take several
+minutes. It installs no host or system packages.
+
 ## Verification
 
 ### Backend
@@ -311,3 +366,7 @@ go run ./cmd/app
 - `fe:check`
 - `fe:build`
 - `fe:test`
+
+### First-party images
+
+- `images:validate`

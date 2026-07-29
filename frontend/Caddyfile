@@ -2,22 +2,15 @@
 	admin off
 	auto_https off
 	persist_config off
-	log {
+	log default {
 		output stdout
-		format console
+		format json
 	}
 }
 
-:65101 {
+http://:65101 {
+	log
 	root * /srv
-	encode zstd gzip
-	log {
-		output stdout
-		format console
-	}
-
-	handle {
-		try_files {path} /index.html
-		file_server
-	}
+	try_files {path} /index.html
+	file_server
 }

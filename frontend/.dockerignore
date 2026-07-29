@@ -1,0 +1,9 @@
+.dockerignore
+.gitignore
+Dockerfile
+dist
+dist-ssr
+node_modules
+*.log
+**/*.test.ts
+**/*.test.tsx
