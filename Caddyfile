@@ -8,17 +8,21 @@
 	}
 }
 
-:65199 {
+http://:65199 {
 	log {
 		output stdout
 		format console
 	}
 
 	handle_path /api/* {
-		reverse_proxy backend:65102
+		reverse_proxy backend:65102 {
+			header_up Accept-Encoding identity
+		}
 	}
 
 	handle {
-		reverse_proxy frontend:65101
+		reverse_proxy frontend:65101 {
+			header_up Accept-Encoding identity
+		}
 	}
 }

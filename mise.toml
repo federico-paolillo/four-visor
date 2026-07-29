@@ -19,7 +19,9 @@ dir = "backend/"
 run = '''
 set -eu
 compose() {
-  docker compose -p four-visor-test -f ../docker-compose.yml -f ../docker-compose.test.yml "$@"
+  FOURVISOR_COMMIT_HASH=0000000000000000000000000000000000000000 \
+    OTEL_EXPORTER_OTLP_ENDPOINT=collector.invalid:65103 \
+    docker compose -p four-visor-test -f ../docker-compose.yml -f ../docker-compose.test.yml "$@"
 }
 cleanup() {
   compose down --remove-orphans >/dev/null 2>&1 || true
@@ -60,3 +62,7 @@ run = "npm run test"
 description = "Build and validate the Linux amd64 first-party images"
 depends = ["be:build", "be:test", "be:lint", "fe:build", "fe:test", "fe:lint", "fe:check"]
 run = "scripts/validate-images.sh"
+
+[tasks."compose:validate"]
+description = "Validate the five-service Compose deployment without starting it"
+run = "scripts/validate-compose.sh"

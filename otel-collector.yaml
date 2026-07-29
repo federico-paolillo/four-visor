@@ -3,8 +3,6 @@ receivers:
     protocols:
       grpc:
         endpoint: 0.0.0.0:65103
-      http:
-        endpoint: 0.0.0.0:65104
 
 processors:
   tail_sampling:
@@ -21,7 +19,7 @@ processors:
 
 exporters:
   otlp_grpc:
-    endpoint: ${env:FOURVISOR_OTLP_EXPORT_ENDPOINT} # Provided by operator at deployment time
+    endpoint: ${env:OTEL_EXPORTER_OTLP_ENDPOINT} # Provided by operator at deployment time
     tls:
       insecure: true
 

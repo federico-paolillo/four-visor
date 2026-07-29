@@ -1,15 +1,77 @@
 name: four-visor
+
 services:
-  otelcol:
-    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.157.0
+  edge:
+    image: caddy:2.11.4-alpine@sha256:98eb57d882ccd5213d1688764db10c1ca2c58a1ca3a6717a3411ad798f7a423a
+    platform: linux/amd64
+    restart: unless-stopped
+    ports:
+      - host_ip: 127.0.0.1
+        published: "65199"
+        target: 65199
+        protocol: tcp
     volumes:
-      - ./otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - type: bind
+        source: ./Caddyfile
+        target: /etc/caddy/Caddyfile
+        read_only: true
+    networks:
+      - app
+
+  frontend:
+    image: four-visor-frontend:${FOURVISOR_COMMIT_HASH:?FOURVISOR_COMMIT_HASH is required}
+    pull_policy: never
+    platform: linux/amd64
+    build:
+      context: frontend/
+      dockerfile: Dockerfile
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    networks:
+      - app
+
+  backend:
+    image: four-visor-backend:${FOURVISOR_COMMIT_HASH:?FOURVISOR_COMMIT_HASH is required}
+    pull_policy: never
+    platform: linux/amd64
+    build:
+      context: backend/
+      dockerfile: Dockerfile
+    user: "65532:65532"
+    read_only: true
+    restart: unless-stopped
+    environment:
+      - FOURVISOR_MEMCACHED_ADDRESS=memcached:65100
+      - FOURVISOR_COMMIT_HASH=${FOURVISOR_COMMIT_HASH:?FOURVISOR_COMMIT_HASH is required}
+      - FOURVISOR_HEALTH_TIMEOUT
+      - FOURVISOR_DNS_NAME
+      - FOURVISOR_OTLP_ENDPOINT
+      - FOURVISOR_ACQUISITION_RATE_INTERVAL
+      - FOURVISOR_ACQUISITION_MAX_CONCURRENCY
+      - FOURVISOR_ACQUISITION_REQUEST_TIMEOUT
+      - FOURVISOR_ACQUISITION_MAX_RETRIES
+      - FOURVISOR_ACQUISITION_RETRY_BACKOFF
+      - FOURVISOR_SYNCHRONIZATION_INTERVAL
+      - FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE
+    healthcheck:
+      test: ["CMD", "/usr/bin/four-visor", "healthcheck", "http://127.0.0.1:65102/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - app
+      - cache
+
   memcached:
-    image: memcached:1.6.45-alpine
+    image: memcached:1.6.45-alpine@sha256:fb019eacc7baefab28dd9424a093181f9be578785ff820acfc223cca7d196eb3
+    platform: linux/amd64
     restart: unless-stopped
     command:
       [
         "memcached",
+        "--listen=0.0.0.0",
         "--port=65100",
         "--memory-limit=64",
         "--max-item-size=1m",
@@ -17,24 +79,23 @@ services:
       ]
     networks:
       - cache
-  frontend:
-    build:
-      context: frontend/
-      dockerfile: Dockerfile
-  backend:
-    build:
-      context: backend/
-      dockerfile: Dockerfile
-    networks:
-      - default
-      - cache
-  edge:
-    image: caddy:2.11.3
-    ports:
-      - 127.0.0.1:65199:65199
+
+  otelcol:
+    image: ghcr.io/open-telemetry/opentelemetry-collector-releases/opentelemetry-collector-contrib:0.157.0@sha256:4eb842091c796156d4d3c994eb22ba793590f5723719dbf6b8436cb4dfc17f48
+    platform: linux/amd64
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:?OTEL_EXPORTER_OTLP_ENDPOINT is required}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - type: bind
+        source: ./otel-collector.yaml
+        target: /etc/otelcol-contrib/config.yaml
+        read_only: true
+    networks:
+      - app
 
 networks:
+  app:
   cache:
     internal: true

@@ -31,5 +31,5 @@
 - [x] US-014 Read nested, collapsible threads with honest degradation
 - [x] US-015 Load media directly and only with the required user intent
 - [x] US-016 Package the backend and PWA as hardened first-party images
-- [ ] US-017 Deploy one loopback edge with private internal services
+- [x] US-017 Deploy one loopback edge with private internal services
 - [ ] US-018 Retain failed traces and a sample of successful operation

@@ -348,6 +348,85 @@ A cold run needs access to the configured container registries, Go module proxy
 and npm registry and may take 15–30 minutes; cached runs usually take several
 minutes. It installs no host or system packages.
 
+## Compose deployment
+
+The production Compose project contains exactly five Linux amd64 services:
+edge Caddy, frontend Caddy, backend, Memcached and OpenTelemetry Collector.
+Only edge Caddy is published, as plain HTTP on `127.0.0.1:65199`. The VPS
+ingress must proxy to `http://127.0.0.1:65199` and remains the sole owner of TLS
+termination and Brotli response compression. Do not add a public, IPv6 or
+all-interface Docker publication and do not change the host firewall for this
+deployment.
+
+Edge, frontend, backend and Collector share the ordinary `app` network. Only
+backend and Memcached share the separate `cache` network, which is marked
+internal. Memcached listens on `65100`, frontend on `65101`, backend on `65102`,
+Collector OTLP/gRPC on `65103`, and edge on `65199`. Frontend, backend,
+Memcached and Collector have no host publication. Edge strips `/api` before
+proxying `/api/*` to the backend, so `/api/snapshot` becomes `/snapshot` and
+`/api/health` becomes `/health`; every other path goes to frontend Caddy.
+
+Copy the environment template and fill both required values. The commit must be
+the full lowercase hash of the checked-out deployment. The Collector endpoint
+is required by its existing native configuration; do not put credentials in the
+tracked example.
+
+```sh
+cp .env.example .env
+git rev-parse HEAD
+```
+
+Optional `FOURVISOR_` entries in `.env.example` stay commented unless the
+operator intends to override a backend default. When absent, Compose omits them
+from the backend container environment and the Go defaults in the table above
+remain authoritative. The Compose deployment does not pass through
+`FOURVISOR_SERVER_ADDRESS`; its backend listener is fixed to `:65102` to match
+edge routing and the healthcheck. Memcached, Caddy and Collector use their native
+command, file and environment configuration; the Collector receives
+`OTEL_EXPORTER_OTLP_ENDPOINT`, never a project-prefixed replacement.
+
+Validate configuration, pull only the three upstream images, build the two
+first-party images locally, then start the project without another build:
+
+```sh
+mise run compose:validate
+docker compose pull edge memcached otelcol
+docker compose build --pull backend frontend
+docker compose up -d --no-build
+```
+
+Stop and resume the existing deployment with:
+
+```sh
+docker compose stop
+docker compose up -d --no-build
+```
+
+For an upgrade, update the checkout, replace `FOURVISOR_COMMIT_HASH` in `.env`
+with the new `git rev-parse HEAD` value, validate, and recreate from locally
+built first-party images:
+
+```sh
+git pull --ff-only
+mise run compose:validate
+docker compose pull edge memcached otelcol
+docker compose build --pull backend frontend
+docker compose up -d --no-build --remove-orphans
+```
+
+Upstream service references use reviewed version tags plus pinned Linux amd64
+manifest digests. Update each tag and digest together. Backend and frontend are
+tagged with the deployed commit and are not pulled from a project registry.
+
+This personal deployment accepts a temporary outage of any single service.
+Edge loss makes the application unreachable; frontend loss prevents uncached
+shell loads; backend loss prevents synchronization; Collector loss drops
+telemetry without changing application operations. Memcached is disposable:
+after loss, snapshot requests return `410 Gone` until the next ordinary
+scheduled backend synchronization reconstructs and activates a lineage. Do not
+add a persistent cache, manual or client-triggered acquisition, replicas,
+failover, wait-for orchestration or firewall rules as a recovery mechanism.
+
 ## Verification
 
 ### Backend
@@ -370,3 +449,7 @@ minutes. It installs no host or system packages.
 ### First-party images
 
 - `images:validate`
+
+### Compose deployment
+
+- `compose:validate`
