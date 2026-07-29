@@ -74,6 +74,8 @@ one in-flight gomemcache operation remains bounded by its 500 ms socket timeout.
 | `FOURVISOR_ACQUISITION_REQUEST_TIMEOUT` | `5s` | Timeout for one outbound request attempt and its response body. |
 | `FOURVISOR_ACQUISITION_MAX_RETRIES` | `2` | Retries after the initial attempt, from 0 through 2. |
 | `FOURVISOR_ACQUISITION_RETRY_BACKOFF` | `1s` | Base retry delay; retry one waits once this value and retry two waits twice it. |
+| `FOURVISOR_SYNCHRONIZATION_INTERVAL` | `1h` | Fixed backend lineage cadence in whole seconds (minimum `1s`) and the basis for the twice-interval Memcached TTL. |
+| `FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE` | `10` | Observability threshold; exceeding it never prevents activation. |
 | `FOURVISOR_COMMIT_HASH` | required | Full lowercase 40-character deployed Git commit used in `User-Agent: 4Visor/<hash>`. |
 
 Empty, malformed, or out-of-range project-local settings stop startup with a
@@ -135,6 +137,38 @@ share a cleanup deadline calculated from twice the synchronization interval.
 After activation, the prior completion entry and blocks are deleted immediately;
 deletion failure leaves the new lineage active and its TTL remains the cleanup
 fallback.
+
+### Scheduled lineage synchronization
+
+The backend derives one random integer-second startup offset from 5 through 60
+seconds and keeps it for the process lifetime. The first synchronization starts
+after that offset, and the configured fixed cadence is anchored there. A tick
+delivered while construction is active is logged and discarded once: it is not
+queued, replayed, used to cancel work, or followed by a catch-up attempt. The
+next ordinary tick is the next opportunity. Shutdown cancels and waits for the
+active synchronization.
+
+Each attempt creates a new ULID and one UTC RFC 3339 `observedAt` from its start
+instant. Acquisition runs from scratch under a fixed 30-minute child deadline.
+Known board, catalog, and thread work unfinished at that cutoff becomes exact
+failed-resource wrappers and may still publish under the live application
+context. External or shutdown cancellation instead aborts publication and
+preserves the previous active pointer.
+
+Every validated, published lineage activates even when degraded. A positive
+failed-resource count is reported as degraded; exceeding the configured
+tolerance only raises the synchronization root span and completion log to error
+severity. Publication receives the configured interval unchanged, and every
+lineage key receives one shared conceptual deadline exactly twice that interval
+after publication starts. Memcached encodes and evaluates that deadline at its
+documented one-second resolution. Post-activation cleanup failure never rolls
+activation back.
+
+The active-lineage age gauge is intentionally instance-local and is absent until
+the process activates a lineage. It may remain stale during undetected
+Memcached loss. Cache loss still makes `GET /snapshot` return `410 Gone`; there
+is no immediate repair, and the next ordinary scheduled attempt reconstructs
+serving state from upstream.
 
 Memcached is disposable serving state. Restart, loss, expiry after verification,
 or a reader racing immediate eviction of a previously observed pointer can make

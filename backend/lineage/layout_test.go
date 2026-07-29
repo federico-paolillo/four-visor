@@ -162,8 +162,8 @@ func TestMemcachedExpiration(t *testing.T) {
 	}
 
 	deadline := now.Add(2*time.Hour + 500*time.Millisecond)
-	if got, err := memcachedExpiration(now, deadline); err != nil || got != int32(deadline.Unix()+1) {
-		t.Fatalf("ceiling expiration = %d, %v, want %d", got, err, deadline.Unix()+1)
+	if got, err := memcachedExpiration(now, deadline); err != nil || got != int32(deadline.Unix()) {
+		t.Fatalf("quantized expiration = %d, %v, want %d", got, err, deadline.Unix())
 	}
 	if _, err := memcachedExpiration(deadline, deadline); !errors.Is(err, errExpiredPublication) {
 		t.Fatalf("elapsed expiration error = %v", err)
@@ -180,18 +180,21 @@ func TestMemcachedExpiration(t *testing.T) {
 		t.Fatalf("exact publication deadline = %v, %v", exactDeadline, err)
 	}
 	if got, err := memcachedExpiration(nonaligned, exactDeadline); err != nil ||
-		got != int32(exactDeadline.Unix()+1) {
+		got != int32(exactDeadline.Unix()) {
 		t.Fatalf("nonaligned thirty-day expiration = %d, %v", got, err)
 	}
 	absoluteDeadline := nonaligned.Add(31 * 24 * time.Hour)
 	if got, err := memcachedExpiration(nonaligned, absoluteDeadline); err != nil ||
-		got != int32(absoluteDeadline.Unix()+1) {
-		t.Fatalf("absolute ceiling expiration = %d, %v", got, err)
+		got != int32(absoluteDeadline.Unix()) {
+		t.Fatalf("absolute quantized expiration = %d, %v", got, err)
 	}
-	for _, interval := range []time.Duration{0, -time.Nanosecond} {
+	for _, interval := range []time.Duration{0, -time.Nanosecond, time.Nanosecond, 999 * time.Millisecond, 1500 * time.Millisecond} {
 		if _, err := publicationDeadline(now, interval); !errors.Is(err, errInvalidInterval) {
 			t.Fatalf("invalid interval %s error = %v", interval, err)
 		}
+	}
+	if deadline, err := publicationDeadline(now, time.Second); err != nil || !deadline.Equal(now.Add(2*time.Second)) {
+		t.Fatalf("minimum interval deadline = %v, %v", deadline, err)
 	}
 	if _, err := publicationDeadline(now, time.Duration(math.MaxInt64)); !errors.Is(err, errInvalidInterval) {
 		t.Fatalf("overflow interval error = %v", err)
@@ -202,8 +205,11 @@ func TestMemcachedExpiration(t *testing.T) {
 	if got, err := memcachedExpiration(near2038, lastRepresentable); err != nil || got != math.MaxInt32 {
 		t.Fatalf("last representable expiration = %d, %v", got, err)
 	}
-	if _, err := memcachedExpiration(near2038, lastRepresentable.Add(time.Nanosecond)); !errors.Is(err, errInvalidInterval) {
-		t.Fatalf("subsecond 2038 overflow error = %v", err)
+	if got, err := memcachedExpiration(near2038, lastRepresentable.Add(time.Nanosecond)); err != nil || got != math.MaxInt32 {
+		t.Fatalf("subsecond last expiration = %d, %v", got, err)
+	}
+	if _, err := memcachedExpiration(near2038, lastRepresentable.Add(time.Second)); !errors.Is(err, errInvalidInterval) {
+		t.Fatalf("2038 overflow error = %v", err)
 	}
 	farDeadline, err := publicationDeadline(near2038, 16*24*time.Hour)
 	if err != nil {

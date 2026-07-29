@@ -527,7 +527,7 @@ func TestPublicationUsesOneAbsoluteExpirationWithAdvancingClock(t *testing.T) {
 		interval time.Duration
 		advance  time.Duration
 	}{
-		{name: "subsecond", interval: 750 * time.Millisecond, advance: 100 * time.Millisecond},
+		{name: "minimum", interval: time.Second, advance: 100 * time.Millisecond},
 		{name: "within thirty days", interval: time.Hour, advance: 250 * time.Millisecond},
 		{name: "thirty day boundary", interval: 15 * 24 * time.Hour, advance: time.Second},
 		{name: "above thirty days", interval: 16 * 24 * time.Hour, advance: time.Second},
@@ -556,9 +556,6 @@ func TestPublicationUsesOneAbsoluteExpirationWithAdvancingClock(t *testing.T) {
 
 			deadline := base.Add(2 * test.interval)
 			want := deadline.Unix()
-			if deadline.Nanosecond() != 0 {
-				want++
-			}
 			if len(cache.items) != 4 {
 				t.Fatalf("stored item count = %d, want 4", len(cache.items))
 			}
@@ -568,6 +565,21 @@ func TestPublicationUsesOneAbsoluteExpirationWithAdvancingClock(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPublicationRejectsSubsecondAndFractionalSecondIntervals(t *testing.T) {
+	for _, interval := range []time.Duration{time.Nanosecond, 999 * time.Millisecond, 1500 * time.Millisecond} {
+		cache := newFakeMemcache()
+		publisher := testPublisher(t, cache)
+
+		err := publisher.Publish(t.Context(), testSnapshot(newLineageID, 0), interval)
+		if !errors.Is(err, errInvalidInterval) {
+			t.Fatalf("Publish(interval=%s) error = %v, want invalid interval", interval, err)
+		}
+		if len(cache.items) != 0 {
+			t.Fatalf("Publish(interval=%s) wrote %d cache items", interval, len(cache.items))
+		}
 	}
 }
 

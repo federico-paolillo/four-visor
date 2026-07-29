@@ -10,14 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
 	"git.disroot.org/federico-paolillo/four-visor.git/config"
-	"git.disroot.org/federico-paolillo/four-visor.git/health"
-	"git.disroot.org/federico-paolillo/four-visor.git/lineage"
 	"git.disroot.org/federico-paolillo/four-visor.git/telemetry"
-	"go.opentelemetry.io/otel"
 )
 
 const (
@@ -32,6 +30,13 @@ const (
 type applicationError struct {
 	operation string
 	cause     error
+}
+
+// inFlightHandlers closes the telemetry entry gate before joining handlers already inside it.
+type inFlightHandlers struct {
+	mu       sync.Mutex
+	wait     sync.WaitGroup
+	stopping bool
 }
 
 func (err *applicationError) Error() string {
@@ -55,82 +60,144 @@ func run(parent context.Context, stderr io.Writer) error {
 	}
 	defer shutdownTelemetry(context.WithoutCancel(parent), providers)
 
-	handler, err := applicationHandler(cfg, providers)
+	application, err := newApplication(cfg, providers)
 	if err != nil {
-		return &applicationError{operation: "creating HTTP handler", cause: err}
+		return &applicationError{operation: "creating application", cause: err}
 	}
 
 	server := &http.Server{
 		Addr:              cfg.ServerAddress,
-		Handler:           handler,
+		Handler:           application.handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		ReadTimeout:       readTimeout,
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       idleTimeout,
 	}
 
-	ctx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
+	var listenConfig net.ListenConfig
+
+	listener, err := listenConfig.Listen(parent, "tcp", cfg.ServerAddress)
+	if err != nil {
+		return &applicationError{operation: "listening for HTTP", cause: err}
+	}
+	defer listener.Close() //nolint:errcheck // Shutdown or Serve owns the meaningful close result.
+
+	return serve(parent, server, listener, &application)
+}
+
+func serve(parent context.Context, server *http.Server, listener net.Listener, application *application) error {
+	signalCtx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	shutdown := func(server *http.Server) error {
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), shutdownTimeout)
+		defer cancel()
+
+		return server.Shutdown(ctx)
+	}
+
+	return serveHTTP(signalCtx, server, listener, application.scheduler.Run, shutdown)
+}
+
+func serveHTTP(
+	parent context.Context,
+	server *http.Server,
+	listener net.Listener,
+	runScheduler func(context.Context),
+	shutdown func(*http.Server) error,
+) error {
+	ctx, cancelApplication := context.WithCancel(parent)
+
+	var handlers inFlightHandlers
+
+	server.Handler = handlers.track(server.Handler)
+
+	var scheduler sync.WaitGroup
+	scheduler.Go(func() { runScheduler(ctx) })
 
 	serverError := make(chan error, 1)
 	go func() {
-		serverError <- server.ListenAndServe()
+		serverError <- server.Serve(listener)
 	}()
 
+	var serveError error
+
+	serverResultRead := false
+
 	select {
-	case err := <-serverError:
-		if !errors.Is(err, http.ErrServerClosed) {
-			return &applicationError{operation: "serving HTTP", cause: err}
-		}
+	case serveError = <-serverError:
+		serverResultRead = true
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-		defer cancel()
-
-		err = server.Shutdown(shutdownCtx)
-		if err != nil {
-			return &applicationError{operation: "shutting down HTTP", cause: err}
-		}
-
-		err = <-serverError
-		if !errors.Is(err, http.ErrServerClosed) {
-			return &applicationError{operation: "serving HTTP", cause: err}
-		}
 	}
 
-	return nil
+	handlers.stop()
+	cancelApplication()
+
+	shutdownError := shutdown(server)
+
+	var closeError error
+	if shutdownError != nil {
+		closeError = server.Close()
+	}
+
+	if !serverResultRead {
+		serveError = <-serverError
+	}
+
+	scheduler.Wait()
+	handlers.wait.Wait()
+
+	return serverLifecycleError(serveError, shutdownError, closeError)
 }
 
-func applicationHandler(cfg config.Config, providers *telemetry.Providers) (http.Handler, error) {
-	cache := health.NewMemcached(cfg.MemcachedAddress)
-	dns := health.NewDNS(cfg.DNSName, net.DefaultResolver)
-	healthHandler := health.NewHandler(
-		cfg.HealthTimeout,
-		providers.Slog,
-		providers.Tracer.Tracer("four-visor/health"),
-		cache,
-		dns,
-	)
+func (handlers *inFlightHandlers) track(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		handlers.mu.Lock()
+		if handlers.stopping {
+			handlers.mu.Unlock()
+			http.Error(writer, "service unavailable", http.StatusServiceUnavailable)
 
-	snapshotHandler, err := lineage.NewSnapshotHandler(
-		cfg.MemcachedAddress,
-		providers.Slog,
-		providers.Tracer.Tracer("four-visor/lineage"),
-		providers.Meter.Meter("four-visor/lineage"),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("creating snapshot handler: %w", err)
+			return
+		}
+
+		handlers.wait.Add(1)
+
+		handlers.mu.Unlock()
+		defer handlers.wait.Done()
+
+		next.ServeHTTP(writer, request)
+	})
+}
+
+func (handlers *inFlightHandlers) stop() {
+	handlers.mu.Lock()
+	handlers.stopping = true
+	handlers.mu.Unlock()
+}
+
+func serverLifecycleError(serveError, shutdownError, closeError error) error {
+	if errors.Is(serveError, http.ErrServerClosed) {
+		serveError = nil
 	}
 
-	mux := http.NewServeMux()
-	mux.Handle("/health", healthHandler)
-	mux.Handle("/snapshot", snapshotHandler)
-
-	handler, err := telemetry.HTTPHandler(mux, providers.Tracer, providers.Meter, otel.GetTextMapPropagator())
-	if err != nil {
-		return nil, fmt.Errorf("instrumenting HTTP handler: %w", err)
+	cause := errors.Join(
+		wrapOperation("serving HTTP", serveError),
+		wrapOperation("shutting down HTTP", shutdownError),
+		wrapOperation("forcing HTTP connections closed", closeError),
+	)
+	if cause == nil {
+		return nil
 	}
 
-	return handler, nil
+	return &applicationError{operation: "stopping HTTP", cause: cause}
+}
+
+func wrapOperation(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	return fmt.Errorf("%s: %w", operation, err)
 }
 
 func shutdownTelemetry(parent context.Context, providers *telemetry.Providers) {

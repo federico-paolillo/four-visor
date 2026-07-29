@@ -21,7 +21,7 @@
 - [x] US-004 Complete lineages with bounded thread acquisition
 - [x] US-005 Publish one immutable lineage atomically through Memcached
 - [x] US-006 Serve the active lineage as one logical snapshot
-- [ ] US-007 Build and activate lineages on the backend schedule
+- [x] US-007 Build and activate lineages on the backend schedule
 - [ ] US-008 Install and reopen the application shell offline
 - [ ] US-009 Start from, fail on, or reset local snapshot storage
 - [ ] US-010 Replace the local lineage only after complete synchronization

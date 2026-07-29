@@ -62,12 +62,17 @@ type threadJob struct {
 func New(
 	policy Policy,
 	userAgent string,
+	transport http.RoundTripper,
 	logger *slog.Logger,
 	tracer trace.Tracer,
 	meter metric.Meter,
 ) (*Client, error) {
+	if transport == nil {
+		return nil, fmt.Errorf("%w: missing HTTP transport", errInvalidPolicy)
+	}
+
 	httpClient := &http.Client{
-		Transport: http.DefaultTransport,
+		Transport: transport,
 		CheckRedirect: func(*http.Request, []*http.Request) error {
 			return http.ErrUseLastResponse
 		},

@@ -33,6 +33,10 @@ func TestLoadDefaults(t *testing.T) {
 			RetryBackoff:   defaultRetryBackoff,
 			UserAgent:      "4Visor/0123456789abcdef0123456789abcdef01234567",
 		},
+		Synchronization: Synchronization{
+			Interval:                defaultSyncInterval,
+			FailedResourceTolerance: defaultTolerance,
+		},
 	}
 	if got != want {
 		t.Fatalf("Load() = %#v, want %#v", got, want)
@@ -52,6 +56,8 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv(requestTimeoutKey, "3s")
 	t.Setenv(maxRetriesKey, "1")
 	t.Setenv(retryBackoffKey, "500ms")
+	t.Setenv(syncIntervalKey, "1s")
+	t.Setenv(failedToleranceKey, "4")
 
 	got, err := Load()
 	if err != nil {
@@ -67,6 +73,9 @@ func TestLoadOverrides(t *testing.T) {
 		got.Acquisition.RetryBackoff != 500*time.Millisecond ||
 		got.Acquisition.UserAgent != "4Visor/0123456789abcdef0123456789abcdef01234567" {
 		t.Fatalf("Load() returned unexpected acquisition overrides: %#v", got.Acquisition)
+	}
+	if got.Synchronization.Interval != time.Second || got.Synchronization.FailedResourceTolerance != 4 {
+		t.Fatalf("Load() returned unexpected synchronization overrides: %#v", got.Synchronization)
 	}
 }
 
@@ -94,6 +103,13 @@ func TestLoadValidation(t *testing.T) {
 		{name: "negative retries", key: maxRetriesKey, value: "-1"},
 		{name: "retries above maximum", key: maxRetriesKey, value: "3"},
 		{name: "zero retry backoff", key: retryBackoffKey, value: "0s"},
+		{name: "invalid synchronization interval", key: syncIntervalKey, value: "later"},
+		{name: "zero synchronization interval", key: syncIntervalKey, value: "0s"},
+		{name: "subsecond synchronization interval", key: syncIntervalKey, value: "999ms"},
+		{name: "fractional-second synchronization interval", key: syncIntervalKey, value: "1500ms"},
+		{name: "unrepresentable synchronization interval", key: syncIntervalKey, value: "200000h"},
+		{name: "invalid failed resource tolerance", key: failedToleranceKey, value: "many"},
+		{name: "negative failed resource tolerance", key: failedToleranceKey, value: "-1"},
 		{name: "missing commit hash", key: commitHashKey},
 		{name: "short commit hash", key: commitHashKey, value: "0123456"},
 		{name: "uppercase commit hash", key: commitHashKey, value: "0123456789ABCDEF0123456789ABCDEF01234567"},
@@ -195,6 +211,8 @@ func clearEnvironment(t *testing.T) {
 		requestTimeoutKey,
 		maxRetriesKey,
 		retryBackoffKey,
+		syncIntervalKey,
+		failedToleranceKey,
 		commitHashKey,
 	} {
 		value, exists := os.LookupEnv(key)

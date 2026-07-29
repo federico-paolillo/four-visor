@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"git.disroot.org/federico-paolillo/four-visor.git/lineage"
 )
 
 const (
@@ -24,6 +26,8 @@ const (
 	requestTimeoutKey     = "FOURVISOR_ACQUISITION_REQUEST_TIMEOUT"
 	maxRetriesKey         = "FOURVISOR_ACQUISITION_MAX_RETRIES"
 	retryBackoffKey       = "FOURVISOR_ACQUISITION_RETRY_BACKOFF"
+	syncIntervalKey       = "FOURVISOR_SYNCHRONIZATION_INTERVAL"
+	failedToleranceKey    = "FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE"
 	commitHashKey         = "FOURVISOR_COMMIT_HASH"
 	defaultServerAddress  = ":65102"
 	defaultHealthTimeout  = 2 * time.Second
@@ -34,6 +38,8 @@ const (
 	defaultRequestTimeout = 5 * time.Second
 	defaultMaxRetries     = 2
 	defaultRetryBackoff   = time.Second
+	defaultSyncInterval   = time.Hour
+	defaultTolerance      = 10
 	minimumRateInterval   = time.Second
 	maximumConcurrency    = 10
 	maximumRetries        = 2
@@ -60,6 +66,12 @@ type Acquisition struct {
 	UserAgent      string
 }
 
+// Synchronization contains the fixed cadence and observability-only degradation threshold.
+type Synchronization struct {
+	Interval                time.Duration
+	FailedResourceTolerance int
+}
+
 // Config contains the settings required by the backend.
 type Config struct {
 	ServerAddress    string
@@ -68,6 +80,7 @@ type Config struct {
 	DNSName          string
 	OTLPEndpoint     string
 	Acquisition      Acquisition
+	Synchronization  Synchronization
 }
 
 // Error preserves a configuration failure while keeping its rendered diagnostic value-free.
@@ -128,6 +141,11 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
+	synchronization, err := loadSynchronization()
+	if err != nil {
+		return Config{}, err
+	}
+
 	return Config{
 		ServerAddress:    serverAddress,
 		HealthTimeout:    healthTimeout,
@@ -135,7 +153,31 @@ func Load() (Config, error) {
 		DNSName:          dnsName,
 		OTLPEndpoint:     otlpEndpoint,
 		Acquisition:      acquisition,
+		Synchronization:  synchronization,
 	}, nil
+}
+
+func loadSynchronization() (Synchronization, error) {
+	interval, err := duration(syncIntervalKey, defaultSyncInterval)
+	if err != nil {
+		return Synchronization{}, err
+	}
+
+	err = lineage.ValidateSynchronizationInterval(interval)
+	if err != nil {
+		return Synchronization{}, configError(
+			syncIntervalKey,
+			"must use whole seconds and have a representable twice-interval Memcached expiry",
+			err,
+		)
+	}
+
+	tolerance, err := nonNegativeInteger(failedToleranceKey, defaultTolerance)
+	if err != nil {
+		return Synchronization{}, err
+	}
+
+	return Synchronization{Interval: interval, FailedResourceTolerance: tolerance}, nil
 }
 
 func loadAcquisition() (Acquisition, error) {
@@ -210,6 +252,20 @@ func integer(key string, fallback, minimum, maximum int) (int, error) {
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < minimum || parsed > maximum {
 		return 0, configError(key, "must be an integer in the allowed range", errors.Join(errInvalidInteger, err))
+	}
+
+	return parsed, nil
+}
+
+func nonNegativeInteger(key string, fallback int) (int, error) {
+	value, ok := os.LookupEnv(key)
+	if !ok {
+		return fallback, nil
+	}
+
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return 0, configError(key, "must be a non-negative integer", errors.Join(errInvalidInteger, err))
 	}
 
 	return parsed, nil

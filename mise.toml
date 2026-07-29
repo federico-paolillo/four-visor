@@ -32,7 +32,7 @@ trap cleanup EXIT INT TERM
 start_cache
 FOURVISOR_TEST_MEMCACHED_ADDRESS=127.0.0.1:65198 \
   FOURVISOR_TEST_MEMCACHED_PRESSURE=0 \
-  go test -race -shuffle=on ./...
+  go test -p=1 -race -shuffle=on ./...
 start_cache
 FOURVISOR_TEST_MEMCACHED_ADDRESS=127.0.0.1:65198 \
   FOURVISOR_TEST_MEMCACHED_PRESSURE=1 \

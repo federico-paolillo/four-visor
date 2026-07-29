@@ -19,6 +19,7 @@ const (
 	completionKeySuffix  = ":complete"
 	blockKeyPrefix       = ":block:"
 	memcachedRelativeMax = 30 * 24 * time.Hour
+	memcachedResolution  = time.Second
 )
 
 var (
@@ -173,7 +174,8 @@ func evictionKeys(lineageID string, metadata completion) ([]string, error) {
 }
 
 func publicationDeadline(now time.Time, interval time.Duration) (time.Time, error) {
-	if interval <= 0 || interval > time.Duration(math.MaxInt64)/2 {
+	if interval < memcachedResolution || interval%memcachedResolution != 0 ||
+		interval > time.Duration(math.MaxInt64)/2 {
 		return time.Time{}, errInvalidInterval
 	}
 
@@ -185,16 +187,26 @@ func publicationDeadline(now time.Time, interval time.Duration) (time.Time, erro
 	return target, nil
 }
 
+// ValidateSynchronizationInterval reports whether Publisher can encode a whole-second twice-interval expiry now.
+func ValidateSynchronizationInterval(interval time.Duration) error {
+	now := time.Now()
+
+	deadline, err := publicationDeadline(now, interval)
+	if err != nil {
+		return err
+	}
+
+	_, err = memcachedExpiration(now, deadline)
+
+	return err
+}
+
 func memcachedExpiration(now, deadline time.Time) (int32, error) {
 	if !deadline.After(now) {
 		return 0, errExpiredPublication
 	}
 
 	absolute := deadline.Unix()
-	if deadline.Nanosecond() != 0 {
-		absolute++
-	}
-
 	if absolute <= int64(memcachedRelativeMax/time.Second) || absolute > math.MaxInt32 {
 		return 0, errInvalidInterval
 	}
