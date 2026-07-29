@@ -35,6 +35,30 @@ prepared personally by me.
 The backend and frontend enforce the same fixture-backed
 [snapshot version 1 contract](docs/snapshot-v1-contract.md).
 
+### Progressive Web App shell
+
+4Visor supports Chrome for Android 150 and newer. Other browsers are outside
+the support contract. Installation requires the production application to be
+served from a secure context; the deployment ingress provides TLS. After one
+successful online load has finished installing the Service Worker, Chrome's
+normal **Install app** or **Add to Home screen** action can install 4Visor, and
+the application shell can be reopened without a network connection. The Vite
+development server deliberately does not register the production worker.
+
+The production build derives one application-shell cache revision from the
+actual manifest and icon bytes plus the generated HTML and content-hashed Vite
+assets. Installation precaches that exact set before the worker activates. A
+new worker removes only obsolete caches named `four-visor-shell-*`; it leaves
+unrelated origin caches and browser-managed HTTP caches untouched.
+
+Cache Storage contains only `index.html`, the Web App Manifest, the two PWA
+icons, and Vite-generated application assets. Snapshot responses and IndexedDB
+records never enter Cache Storage. Snapshot persistence is introduced by later
+stories through IndexedDB. 4chan images, thumbnails, video, audio, and other
+content media are never explicitly cached by 4Visor, although the browser may
+retain them independently in its ordinary HTTP cache. Offline support therefore
+promises the application shell only, not snapshot content or media.
+
 ### Backend HTTP service
 
 The backend serves internal `GET /health` and `GET /snapshot`; the edge maps

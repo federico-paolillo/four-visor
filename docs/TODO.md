@@ -22,7 +22,7 @@
 - [x] US-005 Publish one immutable lineage atomically through Memcached
 - [x] US-006 Serve the active lineage as one logical snapshot
 - [x] US-007 Build and activate lineages on the backend schedule
-- [ ] US-008 Install and reopen the application shell offline
+- [x] US-008 Install and reopen the application shell offline
 - [ ] US-009 Start from, fail on, or reset local snapshot storage
 - [ ] US-010 Replace the local lineage only after complete synchronization
 - [ ] US-011 Refresh with stable installation-local jitter
