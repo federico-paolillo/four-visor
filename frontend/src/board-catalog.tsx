@@ -3,6 +3,7 @@
 import type { ComponentChildren } from "preact";
 import { useEffect, useState } from "preact/hooks";
 
+import { canonicalBoardURL, canonicalThreadURL } from "./fourchan-url";
 import type {
   BoardItem,
   OpaqueObject,
@@ -11,11 +12,10 @@ import type {
   ThreadEntry,
 } from "./snapshot";
 
-const canonicalOrigin = "https://boards.4chan.org";
-const boardIdentifierPattern = /^[a-z0-9]+$/;
-const semanticPathPattern = /^[a-z0-9-]+$/;
 const ageRefreshInterval = 60_000;
 const relativeTime = new Intl.RelativeTimeFormat("en", { numeric: "always" });
+
+export { canonicalBoardURL, canonicalThreadURL } from "./fourchan-url";
 
 export type CatalogSelection = {
   readonly boardIndex: number;
@@ -113,39 +113,6 @@ export function formatSnapshotAge(
 export function startSnapshotAgeClock(refresh: () => void): () => void {
   const interval = setInterval(refresh, ageRefreshInterval);
   return () => clearInterval(interval);
-}
-
-// canonicalBoardURL accepts only coordinates belonging to the canonical HTTPS origin.
-export function canonicalBoardURL(board: OpaqueObject): string | undefined {
-  const identifier = textField(board, "board");
-  if (identifier === undefined || !boardIdentifierPattern.test(identifier)) {
-    return undefined;
-  }
-
-  return canonicalURL(`/${identifier}/`);
-}
-
-// canonicalThreadURL accepts only a valid board, safe thread number, and optional safe slug.
-export function canonicalThreadURL(
-  board: OpaqueObject,
-  summary: OpaqueObject,
-): string | undefined {
-  const identifier = textField(board, "board");
-  const number = positiveIntegerField(summary, "no");
-  if (
-    identifier === undefined ||
-    !boardIdentifierPattern.test(identifier) ||
-    number === undefined
-  ) {
-    return undefined;
-  }
-
-  const semanticPath = textField(summary, "semantic_url");
-  const suffix =
-    semanticPath !== undefined && semanticPathPattern.test(semanticPath)
-      ? `/${semanticPath}`
-      : "";
-  return canonicalURL(`/${identifier}/thread/${number}${suffix}`);
 }
 
 function BoardCatalogContent({
@@ -626,12 +593,5 @@ function nonNegativeIntegerField(
   const value = object[field];
   return Number.isSafeInteger(value) && Number(value) >= 0
     ? Number(value)
-    : undefined;
-}
-
-function canonicalURL(path: string): string | undefined {
-  const url = new URL(path, canonicalOrigin);
-  return url.protocol === "https:" && url.origin === canonicalOrigin
-    ? url.href
     : undefined;
 }

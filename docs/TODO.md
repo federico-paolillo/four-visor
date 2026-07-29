@@ -27,7 +27,7 @@
 - [x] US-010 Replace the local lineage only after complete synchronization
 - [x] US-011 Refresh with stable installation-local jitter
 - [x] US-012 Browse ordered boards and compact catalogs from the local lineage
-- [ ] US-013 Render upstream post markup safely with canonical links
+- [x] US-013 Render upstream post markup safely with canonical links
 - [ ] US-014 Read nested, collapsible threads with honest degradation
 - [ ] US-015 Load media directly and only with the required user intent
 - [ ] US-016 Package the backend and PWA as hardened first-party images
