@@ -31,6 +31,11 @@ export type EncodedLineage = {
   readonly records: readonly LineageRecord[];
 };
 
+type LineageInventory = {
+  readonly descriptors: ReadonlyMap<LineageSlot, LineageDescriptor>;
+  readonly records: readonly LineageRecord[];
+};
+
 export type SnapshotStorageErrorKind = "unavailable" | "corrupt";
 
 // SnapshotStorageError classifies mandatory-storage failures without exposing stored data.
@@ -50,6 +55,21 @@ export class SnapshotStorageError extends Error {
   }
 }
 
+export type SnapshotReplacementErrorKind = "quota" | "storage" | "activation";
+
+// SnapshotReplacementError classifies refresh storage failures without exposing browser diagnostics.
+export class SnapshotReplacementError extends Error {
+  readonly cause: unknown;
+  readonly kind: SnapshotReplacementErrorKind;
+
+  constructor(kind: SnapshotReplacementErrorKind, cause?: unknown) {
+    super(`snapshot replacement ${kind} failure`);
+    this.name = "SnapshotReplacementError";
+    this.kind = kind;
+    this.cause = cause;
+  }
+}
+
 // createLocalStorageKey creates lineage ownership independently of upstream metadata.
 export function createLocalStorageKey(
   cryptoApi: Pick<Crypto, "randomUUID"> = globalThis.crypto,
@@ -63,6 +83,7 @@ export async function encodeLineageRecords(
   storageKey: string,
   serialized: string,
   cryptoApi: Pick<Crypto, "subtle"> = globalThis.crypto,
+  signal?: AbortSignal,
 ): Promise<EncodedLineage> {
   if (!validSlot(slot) || !validStorageKey(storageKey)) {
     throw new SnapshotStorageError("corrupt");
@@ -82,13 +103,17 @@ export async function encodeLineageRecords(
     });
   }
 
+  signal?.throwIfAborted();
+  const sha256 = await digest(bytes, cryptoApi);
+  signal?.throwIfAborted();
+
   return {
     descriptor: {
       slot,
       storageKey,
       recordCount: records.length,
       byteLength: bytes.byteLength,
-      sha256: await digest(bytes, cryptoApi),
+      sha256,
     },
     records,
   };
@@ -97,7 +122,9 @@ export async function encodeLineageRecords(
 // openSnapshotDatabase creates or opens only the exact version-1 schema.
 export async function openSnapshotDatabase(
   factory: IDBFactory | undefined = globalThis.indexedDB,
+  signal?: AbortSignal,
 ): Promise<IDBDatabase> {
+  signal?.throwIfAborted();
   if (factory === undefined) {
     throw new SnapshotStorageError("unavailable");
   }
@@ -106,17 +133,21 @@ export async function openSnapshotDatabase(
   try {
     request = factory.open(snapshotDatabaseName, snapshotDatabaseVersion);
   } catch (cause) {
+    signal?.throwIfAborted();
     throw storageFailure(cause);
   }
 
-  const database = await openedDatabase(request);
+  const database = await openedDatabase(request, signal);
   database.onversionchange = () => database.close();
 
   try {
-    await validateDatabaseSchema(database);
+    signal?.throwIfAborted();
+    await validateDatabaseSchema(database, signal);
+    signal?.throwIfAborted();
     return database;
   } catch (cause) {
     database.close();
+    signal?.throwIfAborted();
     throw cause;
   }
 }
@@ -124,38 +155,314 @@ export async function openSnapshotDatabase(
 // loadActiveSnapshot audits all lineage ownership and validates only the active payload.
 export async function loadActiveSnapshot(
   factory: IDBFactory | undefined = globalThis.indexedDB,
-  keyRange: typeof IDBKeyRange = globalThis.IDBKeyRange,
+  _keyRange: typeof IDBKeyRange = globalThis.IDBKeyRange,
   cryptoApi: Pick<Crypto, "subtle"> = globalThis.crypto,
 ): Promise<SnapshotV1 | undefined> {
   let database: IDBDatabase | undefined;
   try {
     database = await openSnapshotDatabase(factory);
-    const descriptors = await auditLineageOwnership(database);
-    const active = descriptors.get("active");
+    const inventory = await auditLineageOwnership(database);
+    const active = inventory.descriptors.get("active");
     if (active === undefined) {
       return undefined;
     }
 
-    return await readActiveLineage(database, active, keyRange, cryptoApi);
+    return await decodeStoredLineage(
+      active,
+      inventory.records.filter(
+        ({ storageKey }) => storageKey === active.storageKey,
+      ),
+      cryptoApi,
+    );
   } catch (cause) {
     if (cause instanceof SnapshotStorageError) {
       throw cause;
     }
-    throw storageFailure(cause);
+    throw new SnapshotStorageError("corrupt", cause);
   } finally {
     database?.close();
   }
 }
 
-function openedDatabase(request: IDBOpenDBRequest): Promise<IDBDatabase> {
+// replaceActiveSnapshot stages, validates, and atomically promotes one complete document.
+export async function replaceActiveSnapshot(
+  serialized: string,
+  signal: AbortSignal,
+  factory: IDBFactory | undefined = globalThis.indexedDB,
+  keyRange: typeof IDBKeyRange = globalThis.IDBKeyRange,
+  cryptoApi: Pick<Crypto, "randomUUID" | "subtle"> = globalThis.crypto,
+): Promise<SnapshotV1> {
+  signal.throwIfAborted();
+
+  let database: IDBDatabase | undefined;
+  try {
+    database = await openSnapshotDatabase(factory, signal);
+    signal.throwIfAborted();
+
+    const storageKey = createLocalStorageKey(cryptoApi);
+    signal.throwIfAborted();
+    const encoded = await encodeLineageRecords(
+      "incoming",
+      storageKey,
+      serialized,
+      cryptoApi,
+      signal,
+    );
+    signal.throwIfAborted();
+
+    await stageIncomingLineage(database, encoded, keyRange, signal);
+    signal.throwIfAborted();
+    const snapshot = await validateIncomingLineage(
+      database,
+      storageKey,
+      cryptoApi,
+      signal,
+    );
+    signal.throwIfAborted();
+    await activateIncomingLineage(database, storageKey, keyRange, signal);
+
+    return snapshot;
+  } catch (cause) {
+    signal.throwIfAborted();
+    if (cause instanceof SnapshotReplacementError) {
+      throw cause;
+    }
+    if (cause instanceof SnapshotStorageError) {
+      throw replacementFailure("storage", cause);
+    }
+    throw cause;
+  } finally {
+    database?.close();
+  }
+}
+
+async function stageIncomingLineage(
+  database: IDBDatabase,
+  encoded: EncodedLineage,
+  keyRange: typeof IDBKeyRange,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+
+  let transaction: IDBTransaction;
+  try {
+    transaction = database.transaction(
+      [lineageMetadataStoreName, lineageRecordsStoreName],
+      "readwrite",
+    );
+  } catch (cause) {
+    signal.throwIfAborted();
+    throw replacementFailure("storage", cause);
+  }
+
+  let schedulingFailure: unknown;
+  const completion = transactionCompletion(transaction, signal);
+  const metadata = transaction.objectStore(lineageMetadataStoreName);
+  const records = transaction.objectStore(lineageRecordsStoreName);
+  const incomingRequest = metadata.get("incoming");
+  incomingRequest.onsuccess = () => {
+    try {
+      if (incomingRequest.result !== undefined) {
+        const previous = parseDescriptor(incomingRequest.result, "incoming");
+        records.delete(recordRange(previous, keyRange));
+      }
+      for (const record of encoded.records) {
+        records.put(record);
+      }
+      metadata.put(encoded.descriptor);
+    } catch (cause) {
+      schedulingFailure = cause;
+      transaction.abort();
+    }
+  };
+
+  try {
+    await completion;
+    signal.throwIfAborted();
+  } catch (cause) {
+    signal.throwIfAborted();
+    throw replacementFailure("storage", schedulingFailure ?? cause);
+  }
+}
+
+async function validateIncomingLineage(
+  database: IDBDatabase,
+  expectedStorageKey: string,
+  cryptoApi: Pick<Crypto, "subtle">,
+  signal: AbortSignal,
+): Promise<SnapshotV1> {
+  signal.throwIfAborted();
+
+  let inventory: LineageInventory;
+  try {
+    inventory = await auditLineageOwnership(database, signal);
+    signal.throwIfAborted();
+  } catch (cause) {
+    signal.throwIfAborted();
+    throw replacementFailure("storage", cause);
+  }
+
+  const incoming = inventory.descriptors.get("incoming");
+  if (incoming?.storageKey !== expectedStorageKey) {
+    throw replacementFailure(
+      "storage",
+      new Error("staged incoming lineage changed"),
+    );
+  }
+
+  try {
+    return await decodeStoredLineage(
+      incoming,
+      inventory.records.filter(
+        ({ storageKey }) => storageKey === incoming.storageKey,
+      ),
+      cryptoApi,
+      signal,
+    );
+  } catch (cause) {
+    signal.throwIfAborted();
+    if (cause instanceof SnapshotStorageError) {
+      throw replacementFailure("storage", cause);
+    }
+    throw cause;
+  }
+}
+
+async function activateIncomingLineage(
+  database: IDBDatabase,
+  expectedStorageKey: string,
+  keyRange: typeof IDBKeyRange,
+  signal: AbortSignal,
+): Promise<void> {
+  signal.throwIfAborted();
+
+  let transaction: IDBTransaction;
+  try {
+    transaction = database.transaction(
+      [lineageMetadataStoreName, lineageRecordsStoreName],
+      "readwrite",
+    );
+  } catch (cause) {
+    signal.throwIfAborted();
+    throw replacementFailure("activation", cause);
+  }
+
+  let schedulingFailure: unknown;
+  const completion = transactionCompletion(transaction, signal, true);
+  const metadata = transaction.objectStore(lineageMetadataStoreName);
+  const records = transaction.objectStore(lineageRecordsStoreName);
+  const activeRequest = metadata.get("active");
+  const incomingRequest = metadata.get("incoming");
+  let activeReady = false;
+  let incomingReady = false;
+
+  const schedulePromotion = () => {
+    if (!activeReady || !incomingReady) {
+      return;
+    }
+    try {
+      const active =
+        activeRequest.result === undefined
+          ? undefined
+          : parseDescriptor(activeRequest.result, "active");
+      const incoming = parseDescriptor(incomingRequest.result, "incoming");
+      if (incoming.storageKey !== expectedStorageKey) {
+        throw new Error("validated incoming lineage changed");
+      }
+
+      metadata.put({ ...incoming, slot: "active" });
+      metadata.delete("incoming");
+      if (active !== undefined) {
+        records.delete(recordRange(active, keyRange));
+      }
+    } catch (cause) {
+      schedulingFailure = cause;
+      transaction.abort();
+    }
+  };
+
+  activeRequest.onsuccess = () => {
+    activeReady = true;
+    schedulePromotion();
+  };
+  incomingRequest.onsuccess = () => {
+    incomingReady = true;
+    schedulePromotion();
+  };
+
+  try {
+    await completion;
+  } catch (cause) {
+    signal.throwIfAborted();
+    throw replacementFailure("activation", schedulingFailure ?? cause);
+  }
+}
+
+function openedDatabase(
+  request: IDBOpenDBRequest,
+  signal?: AbortSignal,
+): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
     let settled = false;
+    let canceled = false;
+    let upgradeActive = false;
     let upgradeFailure: SnapshotStorageError | undefined;
 
+    const removeAbortListener = () =>
+      signal?.removeEventListener("abort", onCancel);
+    const rejectOnce = (cause: unknown) => {
+      if (!settled) {
+        settled = true;
+        removeAbortListener();
+        reject(cause);
+      }
+    };
+    const abortUpgrade = () => {
+      if (!upgradeActive || request.transaction === null) {
+        return;
+      }
+      try {
+        request.transaction.abort();
+      } catch (cause) {
+        if (!errorNamed(cause, "InvalidStateError")) {
+          upgradeFailure = new SnapshotStorageError("unavailable", cause);
+        }
+      }
+    };
+    const onCancel = () => {
+      canceled = true;
+      abortUpgrade();
+      try {
+        signal?.throwIfAborted();
+      } catch (cause) {
+        rejectOnce(cause);
+      }
+    };
+
+    signal?.addEventListener("abort", onCancel, { once: true });
+    if (signal?.aborted) {
+      onCancel();
+    }
+
     request.onupgradeneeded = (event) => {
+      const transaction = request.transaction;
+      if (transaction !== null) {
+        upgradeActive = true;
+        const finishUpgrade = () => {
+          upgradeActive = false;
+          transaction.removeEventListener("complete", finishUpgrade);
+          transaction.removeEventListener("abort", finishUpgrade);
+        };
+        transaction.addEventListener("complete", finishUpgrade);
+        transaction.addEventListener("abort", finishUpgrade);
+      }
+      if (canceled || signal?.aborted) {
+        abortUpgrade();
+        return;
+      }
       if (event.oldVersion !== 0) {
         upgradeFailure = new SnapshotStorageError("corrupt");
-        request.transaction?.abort();
+        abortUpgrade();
         return;
       }
 
@@ -170,23 +477,23 @@ function openedDatabase(request: IDBOpenDBRequest): Promise<IDBDatabase> {
         database.createObjectStore(settingsStoreName);
       } catch (cause) {
         upgradeFailure = new SnapshotStorageError("corrupt", cause);
-        request.transaction?.abort();
+        abortUpgrade();
       }
     };
     request.onblocked = () => {
-      if (!settled) {
-        settled = true;
-        reject(new SnapshotStorageError("unavailable"));
+      if (!canceled) {
+        rejectOnce(new SnapshotStorageError("unavailable"));
       }
     };
     request.onerror = () => {
-      if (!settled) {
-        settled = true;
-        reject(upgradeFailure ?? storageFailure(request.error));
+      removeAbortListener();
+      if (!canceled) {
+        rejectOnce(upgradeFailure ?? storageFailure(request.error));
       }
     };
     request.onsuccess = () => {
-      if (settled) {
+      removeAbortListener();
+      if (settled || canceled) {
         request.result.close();
         return;
       }
@@ -196,7 +503,10 @@ function openedDatabase(request: IDBOpenDBRequest): Promise<IDBDatabase> {
   });
 }
 
-async function validateDatabaseSchema(database: IDBDatabase): Promise<void> {
+async function validateDatabaseSchema(
+  database: IDBDatabase,
+  signal?: AbortSignal,
+): Promise<void> {
   const expectedStores = [
     lineageMetadataStoreName,
     lineageRecordsStoreName,
@@ -212,7 +522,7 @@ async function validateDatabaseSchema(database: IDBDatabase): Promise<void> {
   } catch (cause) {
     throw storageFailure(cause);
   }
-  const completion = transactionCompletion(transaction);
+  const completion = transactionCompletion(transaction, signal);
 
   const metadata = transaction.objectStore(lineageMetadataStoreName);
   const records = transaction.objectStore(lineageRecordsStoreName);
@@ -240,13 +550,15 @@ async function validateDatabaseSchema(database: IDBDatabase): Promise<void> {
   try {
     await completion;
   } catch (cause) {
+    signal?.throwIfAborted();
     throw storageFailure(cause);
   }
 }
 
 async function auditLineageOwnership(
   database: IDBDatabase,
-): Promise<ReadonlyMap<LineageSlot, LineageDescriptor>> {
+  signal?: AbortSignal,
+): Promise<LineageInventory> {
   let transaction: IDBTransaction;
   try {
     transaction = database.transaction(
@@ -256,7 +568,7 @@ async function auditLineageOwnership(
   } catch (cause) {
     throw storageFailure(cause);
   }
-  const completion = transactionCompletion(transaction);
+  const completion = transactionCompletion(transaction, signal);
   const metadataRequest = transaction
     .objectStore(lineageMetadataStoreName)
     .getAll();
@@ -267,13 +579,17 @@ async function auditLineageOwnership(
   try {
     await completion;
   } catch (cause) {
+    signal?.throwIfAborted();
     throw storageFailure(cause);
   }
 
   try {
     const descriptors = parseDescriptors(metadataRequest.result);
     validateRecords(recordsRequest.result, descriptors);
-    return descriptors;
+    return {
+      descriptors,
+      records: recordsRequest.result as LineageRecord[],
+    };
   } catch (cause) {
     if (cause instanceof SnapshotStorageError) {
       throw cause;
@@ -369,43 +685,37 @@ function validateRecords(
   }
 }
 
-async function readActiveLineage(
-  database: IDBDatabase,
+async function decodeStoredLineage(
   descriptor: LineageDescriptor,
-  keyRanges: typeof IDBKeyRange,
+  records: readonly LineageRecord[],
   cryptoApi: Pick<Crypto, "subtle">,
+  signal?: AbortSignal,
 ): Promise<SnapshotV1> {
-  let transaction: IDBTransaction;
-  let request: IDBRequest<LineageRecord[]>;
-  try {
-    transaction = database.transaction(lineageRecordsStoreName, "readonly");
-    const completion = transactionCompletion(transaction);
-    request = transaction
-      .objectStore(lineageRecordsStoreName)
-      .getAll(
-        keyRanges.bound(
-          [descriptor.storageKey, 0],
-          [descriptor.storageKey, descriptor.recordCount - 1],
-        ),
-      ) as IDBRequest<LineageRecord[]>;
-    await completion;
-  } catch (cause) {
-    throw storageFailure(cause);
+  signal?.throwIfAborted();
+  const bytes = reassemble(descriptor, records);
+  signal?.throwIfAborted();
+  if ((await digest(bytes, cryptoApi)) !== descriptor.sha256) {
+    signal?.throwIfAborted();
+    throw new SnapshotStorageError("corrupt");
   }
+  signal?.throwIfAborted();
+
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch (cause) {
+    signal?.throwIfAborted();
+    throw new SnapshotStorageError("corrupt", cause);
+  }
+  signal?.throwIfAborted();
 
   try {
-    const bytes = reassemble(descriptor, request.result);
-    if ((await digest(bytes, cryptoApi)) !== descriptor.sha256) {
-      throw new SnapshotStorageError("corrupt");
-    }
-    return parseSnapshot(
-      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-    );
+    const snapshot = parseSnapshot(text);
+    signal?.throwIfAborted();
+    return snapshot;
   } catch (cause) {
-    if (cause instanceof SnapshotStorageError) {
-      throw cause;
-    }
-    throw new SnapshotStorageError("corrupt", cause);
+    signal?.throwIfAborted();
+    throw cause;
   }
 }
 
@@ -445,14 +755,71 @@ function reassemble(
   return result;
 }
 
-function transactionCompletion(transaction: IDBTransaction): Promise<void> {
+function transactionCompletion(
+  transaction: IDBTransaction,
+  signal?: AbortSignal,
+  commitWins = false,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     let cause: unknown;
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => {
+    let active = true;
+    let commitAlreadyWon = false;
+
+    const cleanup = () => {
+      active = false;
+      transaction.removeEventListener("complete", onComplete);
+      transaction.removeEventListener("error", onError);
+      transaction.removeEventListener("abort", onAbort);
+      signal?.removeEventListener("abort", onCancel);
+    };
+    const rejectCancellation = () => {
+      try {
+        signal?.throwIfAborted();
+      } catch (reason) {
+        reject(reason);
+      }
+    };
+    const onComplete = () => {
+      cleanup();
+      if (signal?.aborted && !(commitWins && commitAlreadyWon)) {
+        rejectCancellation();
+        return;
+      }
+      resolve();
+    };
+    const onError = () => {
       cause = transaction.error;
     };
-    transaction.onabort = () => reject(cause ?? transaction.error);
+    const onAbort = () => {
+      cleanup();
+      if (signal?.aborted) {
+        rejectCancellation();
+        return;
+      }
+      reject(cause ?? transaction.error);
+    };
+    const onCancel = () => {
+      if (!active) {
+        return;
+      }
+      try {
+        transaction.abort();
+      } catch (abortFailure) {
+        if (errorNamed(abortFailure, "InvalidStateError")) {
+          commitAlreadyWon = true;
+          return;
+        }
+        cause = abortFailure;
+      }
+    };
+
+    transaction.addEventListener("complete", onComplete);
+    transaction.addEventListener("error", onError);
+    transaction.addEventListener("abort", onAbort);
+    signal?.addEventListener("abort", onCancel, { once: true });
+    if (signal?.aborted) {
+      onCancel();
+    }
   });
 }
 
@@ -474,6 +841,52 @@ function storageFailure(cause: unknown): SnapshotStorageError {
       : "unavailable",
     cause,
   );
+}
+
+function replacementFailure(
+  stage: "storage" | "activation",
+  cause: unknown,
+): SnapshotReplacementError {
+  return new SnapshotReplacementError(
+    errorNamed(cause, "QuotaExceededError") ? "quota" : stage,
+    cause,
+  );
+}
+
+function parseDescriptor(
+  value: unknown,
+  expectedSlot: LineageSlot,
+): LineageDescriptor {
+  const descriptor = parseDescriptors([value]).get(expectedSlot);
+  if (descriptor === undefined) {
+    throw new SnapshotStorageError("corrupt");
+  }
+  return descriptor;
+}
+
+function recordRange(
+  descriptor: LineageDescriptor,
+  keyRange: typeof IDBKeyRange,
+): IDBKeyRange {
+  return keyRange.bound(
+    [descriptor.storageKey, 0],
+    [descriptor.storageKey, descriptor.recordCount - 1],
+  );
+}
+
+function errorNamed(cause: unknown, name: string): boolean {
+  if (cause instanceof DOMException && cause.name === name) {
+    return true;
+  }
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    "cause" in cause &&
+    cause.cause !== cause
+  ) {
+    return errorNamed(cause.cause, name);
+  }
+  return false;
 }
 
 function exactObject(

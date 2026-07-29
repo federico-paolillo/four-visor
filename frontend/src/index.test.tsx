@@ -79,6 +79,44 @@ describe("production browser entry", () => {
     expect(browser.fetch).not.toHaveBeenCalled();
   });
 
+  it("exports a due-only controller that coalesces one real snapshot request", async () => {
+    const browser = installBrowser(new IDBFactory(), false);
+    browser.fetch.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
+          observedAt: "2026-07-26T12:00:00Z",
+          boards: { state: "failed" },
+        }),
+      ),
+    );
+
+    const entry = await import("./index");
+    expect(renderedStates()[0]?.kind).toBe("loading");
+    expect(browser.fetch).not.toHaveBeenCalled();
+    const controller = await entry.applicationController;
+    expect(latestState().kind).toBe("empty");
+
+    const owner = new AbortController();
+    const ignored = new AbortController();
+    const first = controller.synchronizeWhenDue(owner.signal);
+    const second = controller.synchronizeWhenDue(ignored.signal);
+
+    expect(second).toBe(first);
+    await first;
+    expect(browser.fetch).toHaveBeenCalledOnce();
+    expect(browser.fetch).toHaveBeenCalledWith("/api/snapshot", {
+      cache: "no-store",
+      method: "GET",
+      signal: owner.signal,
+    });
+    expect(latestState()).toMatchObject({
+      kind: "ready",
+      snapshot: { lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z" },
+    });
+  });
+
   it("waits for its pending production registration before reset cleanup", async () => {
     const pending = deferred<ServiceWorkerRegistration>();
     const factory = new IDBFactory();

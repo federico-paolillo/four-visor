@@ -15,6 +15,10 @@ import {
 } from "./local-reset";
 import type { SnapshotV1 } from "./snapshot";
 import { SnapshotStorageError } from "./snapshot-storage";
+import {
+  SnapshotSynchronizationError,
+  type SnapshotSynchronizationErrorKind,
+} from "./snapshot-sync";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -153,6 +157,103 @@ describe("application reset composition", () => {
   });
 });
 
+describe("due synchronization composition", () => {
+  it("retains the old snapshot and coalesces onto the first signal and exact promise", async () => {
+    const pending = deferred<SnapshotV1>();
+    const application = applicationDouble(async () => snapshot);
+    application.synchronize.mockReturnValueOnce(pending.promise);
+    const controller = await startApplication(application.dependencies);
+    const owner = new AbortController();
+    const ignored = new AbortController();
+
+    const first = controller.synchronizeWhenDue(owner.signal);
+    const second = controller.synchronizeWhenDue(ignored.signal);
+
+    expect(second).toBe(first);
+    expect(application.synchronize).toHaveBeenCalledOnce();
+    expect(application.synchronize).toHaveBeenCalledWith(owner.signal);
+    expect(application.latestState()).toEqual({
+      kind: "synchronizing",
+      snapshot,
+    });
+    expect(application.latestPresentation().reset).toBe("disabled");
+
+    ignored.abort(new Error("ignored"));
+    expect(application.latestState().kind).toBe("synchronizing");
+    await application.latestReset()();
+    expect(application.confirm).not.toHaveBeenCalled();
+    expect(application.reset).not.toHaveBeenCalled();
+
+    pending.resolve(replacementSnapshot);
+    await first;
+    expect(application.latestState()).toEqual({
+      kind: "ready",
+      snapshot: replacementSnapshot,
+    });
+  });
+
+  it("clears the latch after failure so a later scheduled call can succeed", async () => {
+    const application = applicationDouble(async () => snapshot);
+    application.synchronize
+      .mockRejectedValueOnce(
+        new SnapshotSynchronizationError("network", new Error("private")),
+      )
+      .mockResolvedValueOnce(replacementSnapshot);
+    const controller = await startApplication(application.dependencies);
+
+    const failed = controller.synchronizeWhenDue(new AbortController().signal);
+    await failed;
+    expect(application.latestState()).toMatchObject({
+      kind: "synchronization-error",
+      snapshot,
+      error: { kind: "network" },
+    });
+
+    const retried = controller.synchronizeWhenDue(new AbortController().signal);
+    expect(retried).not.toBe(failed);
+    expect(application.latestState()).toMatchObject({
+      kind: "synchronizing",
+      snapshot,
+    });
+    await retried;
+
+    expect(application.synchronize).toHaveBeenCalledTimes(2);
+    expect(application.latestState()).toEqual({
+      kind: "ready",
+      snapshot: replacementSnapshot,
+    });
+  });
+
+  it("classifies the owning abort only in the UI and keeps first sync empty", async () => {
+    const application = applicationDouble(async () => undefined);
+    application.synchronize.mockImplementationOnce(
+      (signal: AbortSignal) =>
+        new Promise<SnapshotV1>((_, reject) =>
+          signal.addEventListener("abort", () => reject(signal.reason), {
+            once: true,
+          }),
+        ),
+    );
+    const controller = await startApplication(application.dependencies);
+    const owner = new AbortController();
+    const reason = new Error("secret cancellation detail");
+
+    const synchronization = controller.synchronizeWhenDue(owner.signal);
+    owner.abort(reason);
+    await synchronization;
+
+    expect(application.latestState()).toMatchObject({
+      kind: "synchronization-error",
+      error: { kind: "canceled", cause: reason },
+    });
+    expect(application.latestState()).toHaveProperty("snapshot", undefined);
+    expect(application.latestPresentation().message).not.toContain(
+      reason.message,
+    );
+    expect(application.latestPresentation().reset).toBe("enabled");
+  });
+});
+
 describe("pure application presentation", () => {
   it.each([
     [{ kind: "loading" }, "hidden", "Opening local storage"],
@@ -194,6 +295,40 @@ describe("pure application presentation", () => {
       });
     },
   );
+
+  it.each([
+    "network",
+    "gone",
+    "http",
+    "invalid-json",
+    "invalid-contract",
+    "unsupported-version",
+    "quota",
+    "storage",
+    "activation",
+  ] satisfies readonly SnapshotSynchronizationErrorKind[])(
+    "maps %s synchronization errors to safe retry-later copy",
+    (kind) => {
+      const presentation = applicationPresentation({
+        kind: "synchronization-error",
+        snapshot,
+        error: new SnapshotSynchronizationError(
+          kind,
+          new Error("secret detail"),
+        ),
+      });
+
+      expect(presentation).toMatchObject({
+        heading: "Snapshot synchronization failed",
+        reset: "enabled",
+        role: "alert",
+      });
+      expect(presentation.message).toContain(
+        "The previous complete snapshot remains available.",
+      );
+      expect(presentation.message).not.toContain("secret detail");
+    },
+  );
 });
 
 function applicationDouble(load: () => Promise<SnapshotV1 | undefined>) {
@@ -205,10 +340,14 @@ function applicationDouble(load: () => Promise<SnapshotV1 | undefined>) {
   const reset = vi.fn<
     (reportProgress: (progress: LocalResetProgress) => void) => Promise<void>
   >(async () => {});
+  const synchronize = vi.fn<(signal: AbortSignal) => Promise<SnapshotV1>>(
+    async () => snapshot,
+  );
   const dependencies: ApplicationDependencies = {
     confirm,
     load,
     reset,
+    synchronize,
     render(state, requestReset) {
       renders.push({ state, reset: requestReset });
     },
@@ -219,6 +358,7 @@ function applicationDouble(load: () => Promise<SnapshotV1 | undefined>) {
     dependencies,
     renders,
     reset,
+    synchronize,
     kinds: () => renders.map(({ state }) => state.kind),
     latestPresentation: () => applicationPresentation(latest(renders).state),
     latestReset: () => latest(renders).reset,
@@ -246,5 +386,12 @@ const snapshot: SnapshotV1 = {
   schemaVersion: 1,
   lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
   observedAt: "2026-07-26T12:00:00Z",
+  boards: { state: "failed" },
+};
+
+const replacementSnapshot: SnapshotV1 = {
+  schemaVersion: 1,
+  lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y8Y",
+  observedAt: "2026-07-25T12:00:00Z",
   boards: { state: "failed" },
 };

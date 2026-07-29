@@ -89,6 +89,32 @@ The reset is local to this browser installation and performs no server reset.
 It loses cached snapshot continuity and stable local jitter, but leaves unrelated
 origin caches and the browser-managed HTTP cache untouched.
 
+### Client snapshot synchronization
+
+When a refresh is due, the client makes one `GET /api/snapshot` request and
+downloads the complete response before replacing local data. It stores the
+response under a fresh local generation key, rereads and validates the stored
+schema-version-1 document, then atomically promotes it while deleting the
+previous generation. The previous complete snapshot remains readable throughout
+this work, including when the backend serves the same lineage ID or an older
+observation time.
+
+Network failure, an unavailable server, `410 Gone`, invalid JSON, an incompatible
+schema version, insufficient quota, local storage failure, and cancellation
+before activation commits all leave the previous active snapshot unchanged.
+Once activation commits, the replacement wins and later cancellation does not
+roll it back. Failed incoming data remains inactive and is replaced by a later
+scheduled attempt or removed by **Reset local data**. No immediate retry or
+individual board, catalog, thread, or post request is made. A fresh installation
+remains empty, with a clear error, until its first complete synchronization
+succeeds.
+
+An incompatible-version error means the deployed frontend and backend must be
+made compatible; version 1 has no migration or fallback parser. A quota error
+requires freeing site storage or resetting local data, which also loses offline
+snapshot continuity and the installation-local jitter seed. Snapshot responses
+and records remain outside Service Worker Cache Storage.
+
 ### Backend HTTP service
 
 The backend serves internal `GET /health` and `GET /snapshot`; the edge maps

@@ -12,11 +12,21 @@ import {
   SnapshotStorageError,
   type SnapshotStorageErrorKind,
 } from "./snapshot-storage";
+import {
+  SnapshotSynchronizationError,
+  type SnapshotSynchronizationErrorKind,
+} from "./snapshot-sync";
 
 export type ApplicationState =
   | { readonly kind: "loading" }
   | { readonly kind: "ready"; readonly snapshot: SnapshotV1 }
   | { readonly kind: "empty" }
+  | { readonly kind: "synchronizing"; readonly snapshot?: SnapshotV1 }
+  | {
+      readonly kind: "synchronization-error";
+      readonly snapshot?: SnapshotV1;
+      readonly error: ApplicationSynchronizationFailure;
+    }
   | {
       readonly kind: "storage-error";
       readonly error: SnapshotStorageError;
@@ -37,6 +47,14 @@ export type ApplicationRenderer = (
   reset: () => Promise<void>,
 ) => void;
 
+export type ApplicationSynchronizationFailure =
+  | SnapshotSynchronizationError
+  | { readonly kind: "canceled"; readonly cause: unknown };
+
+export type ApplicationController = {
+  readonly synchronizeWhenDue: (signal: AbortSignal) => Promise<void>;
+};
+
 export type ApplicationDependencies = {
   readonly confirm: (message: string) => boolean;
   readonly load: () => Promise<SnapshotV1 | undefined>;
@@ -44,6 +62,7 @@ export type ApplicationDependencies = {
   readonly reset: (
     reportProgress: (progress: LocalResetProgress) => void,
   ) => Promise<void>;
+  readonly synchronize: (signal: AbortSignal) => Promise<SnapshotV1>;
 };
 
 // applicationPresentation maps internal state to fixed, safe user-facing copy.
@@ -72,6 +91,21 @@ export function applicationPresentation(
         reset: "enabled",
         resetLabel: "Reset local data",
       };
+    case "synchronizing":
+      return {
+        heading: "Synchronizing snapshot",
+        message:
+          state.snapshot === undefined
+            ? "4Visor is downloading and validating the first complete snapshot."
+            : `Snapshot ${state.snapshot.lineageId} remains available while its replacement is downloaded and validated.`,
+        reset: "disabled",
+        resetLabel: "Synchronizing…",
+      };
+    case "synchronization-error":
+      return synchronizationErrorPresentation(
+        state.error.kind,
+        state.snapshot !== undefined,
+      );
     case "storage-error":
       return storageErrorPresentation(state.error.kind);
     case "resetting":
@@ -136,9 +170,50 @@ export function App({
 // startApplication runs the exact production startup and reset state machine.
 export async function startApplication(
   dependencies: ApplicationDependencies,
-): Promise<void> {
+): Promise<ApplicationController> {
   let state: ApplicationState = { kind: "loading" };
+  let currentSnapshot: SnapshotV1 | undefined;
+  let inFlight: Promise<void> | undefined;
   const show = () => dependencies.render(state, requestReset);
+
+  function synchronizeWhenDue(signal: AbortSignal): Promise<void> {
+    if (inFlight !== undefined) {
+      return inFlight;
+    }
+    if (!synchronizationAllowed(state)) {
+      return Promise.resolve();
+    }
+
+    const operation = runSynchronization(signal);
+    let tracked!: Promise<void>;
+    tracked = operation.finally(() => {
+      if (inFlight === tracked) {
+        inFlight = undefined;
+      }
+    });
+    inFlight = tracked;
+    return tracked;
+  }
+
+  async function runSynchronization(signal: AbortSignal): Promise<void> {
+    state = { kind: "synchronizing", snapshot: currentSnapshot };
+    show();
+    try {
+      currentSnapshot = await dependencies.synchronize(signal);
+      state = { kind: "ready", snapshot: currentSnapshot };
+    } catch (cause) {
+      state = {
+        kind: "synchronization-error",
+        snapshot: currentSnapshot,
+        error: signal.aborted
+          ? { kind: "canceled", cause }
+          : cause instanceof SnapshotSynchronizationError
+            ? cause
+            : new SnapshotSynchronizationError("storage", cause),
+      };
+    }
+    show();
+  }
 
   async function requestReset(): Promise<void> {
     if (!resetAllowed(state) || !dependencies.confirm(resetConfirmationText)) {
@@ -169,6 +244,7 @@ export async function startApplication(
   show();
   try {
     const snapshot = await dependencies.load();
+    currentSnapshot = snapshot;
     state =
       snapshot === undefined ? { kind: "empty" } : { kind: "ready", snapshot };
   } catch (cause) {
@@ -181,6 +257,8 @@ export async function startApplication(
     };
   }
   show();
+
+  return { synchronizeWhenDue };
 }
 
 function Status({
@@ -217,7 +295,52 @@ function storageErrorPresentation(
 }
 
 function resetAllowed(state: ApplicationState): boolean {
-  return ["ready", "empty", "storage-error", "reset-error"].includes(
-    state.kind,
-  );
+  return [
+    "ready",
+    "empty",
+    "synchronization-error",
+    "storage-error",
+    "reset-error",
+  ].includes(state.kind);
+}
+
+function synchronizationAllowed(state: ApplicationState): boolean {
+  return ["ready", "empty", "synchronization-error"].includes(state.kind);
+}
+
+function synchronizationErrorPresentation(
+  kind: SnapshotSynchronizationErrorKind | "canceled",
+  hasSnapshot: boolean,
+): ApplicationPresentation {
+  const messages: Record<
+    SnapshotSynchronizationErrorKind | "canceled",
+    string
+  > = {
+    network:
+      "The snapshot server is unavailable or the network connection failed.",
+    gone: "The server has no complete snapshot available yet.",
+    http: "The snapshot server returned an unsuccessful response.",
+    "invalid-json": "The server returned an invalid snapshot document.",
+    "invalid-contract":
+      "The server snapshot does not match the required schema.",
+    "unsupported-version":
+      "The deployed frontend and backend use incompatible snapshot versions.",
+    quota:
+      "This device does not have enough available site storage for the replacement snapshot.",
+    storage:
+      "The replacement snapshot could not be stored or verified locally.",
+    activation: "The replacement snapshot could not be activated atomically.",
+    canceled: "Snapshot synchronization was canceled.",
+  };
+  return {
+    heading: "Snapshot synchronization failed",
+    message: `${messages[kind]} ${
+      hasSnapshot
+        ? "The previous complete snapshot remains available."
+        : "No local snapshot is available yet."
+    } A later scheduled synchronization can try again.`,
+    reset: "enabled",
+    resetLabel: "Reset local data",
+    role: "alert",
+  };
 }

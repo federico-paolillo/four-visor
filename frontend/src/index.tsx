@@ -4,7 +4,8 @@ import { render } from "preact";
 
 import { App, startApplication } from "./app";
 import { resetLocalData } from "./local-reset";
-import { loadActiveSnapshot } from "./snapshot-storage";
+import { loadActiveSnapshot, replaceActiveSnapshot } from "./snapshot-storage";
+import { synchronizeSnapshot } from "./snapshot-sync";
 import "./style.css";
 
 const appEntryPoint = document.getElementById("app");
@@ -15,7 +16,7 @@ if (appEntryPoint === null) {
 const rootScope = new URL("/", location.href).href;
 let appRegistration: Promise<unknown> = Promise.resolve();
 
-void startApplication({
+export const applicationController = startApplication({
   confirm: (message) => window.confirm(message),
   load: () => loadActiveSnapshot(indexedDB, IDBKeyRange, crypto),
   render: (state, reset) =>
@@ -29,6 +30,16 @@ void startApplication({
       () => location.reload(),
       reportProgress,
       appRegistration,
+    ),
+  synchronize: (signal) =>
+    synchronizeSnapshot(signal, fetch, (serialized, ownerSignal) =>
+      replaceActiveSnapshot(
+        serialized,
+        ownerSignal,
+        indexedDB,
+        IDBKeyRange,
+        crypto,
+      ),
     ),
 });
 

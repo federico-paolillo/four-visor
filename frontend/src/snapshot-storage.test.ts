@@ -12,18 +12,24 @@ import {
   type EncodedLineage,
   encodeLineageRecords,
   jitterSeedKey,
+  type LineageDescriptor,
+  type LineageRecord,
   type LineageSlot,
   lineageMetadataStoreName,
   lineageRecordSize,
   lineageRecordsStoreName,
   loadActiveSnapshot,
   openSnapshotDatabase,
+  replaceActiveSnapshot,
+  SnapshotReplacementError,
   settingsStoreName,
   snapshotDatabaseName,
 } from "./snapshot-storage";
 
 const activeKey = "11111111-1111-4111-8111-111111111111";
 const incomingKey = "22222222-2222-4222-8222-222222222222";
+const replacementKey = "33333333-3333-4333-8333-333333333333";
+const originalTransaction = FakeIDBDatabase.prototype.transaction;
 
 describe("snapshot database schema and codec", () => {
   it("creates exactly three stores with no secondary indexes", async () => {
@@ -228,6 +234,562 @@ describe("startup lineage loading", () => {
   });
 });
 
+describe("complete lineage replacement", () => {
+  it("promotes a same-ID older snapshot under a fresh local key and removes the old generation", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+
+    const snapshot = await replaceActiveSnapshot(
+      olderSameIdSnapshot(),
+      new AbortController().signal,
+      factory,
+      IDBKeyRange,
+      fixedCrypto(incomingKey),
+    );
+    const state = await lineageState(factory);
+
+    expect(snapshot.observedAt).toBe("2026-07-25T12:00:00Z");
+    expect(state.metadata).toEqual([
+      expect.objectContaining({ slot: "active", storageKey: incomingKey }),
+    ]);
+    expect(new Set(state.records.map(({ storageKey }) => storageKey))).toEqual(
+      new Set([incomingKey]),
+    );
+    expect(
+      (await loadActiveSnapshot(factory, IDBKeyRange, crypto))?.observedAt,
+    ).toBe("2026-07-25T12:00:00Z");
+  });
+
+  it("activates the first complete snapshot without creating a second owner", async () => {
+    const factory = new IDBFactory();
+
+    await replaceActiveSnapshot(
+      minimalSnapshot(),
+      new AbortController().signal,
+      factory,
+      IDBKeyRange,
+      fixedCrypto(incomingKey),
+    );
+
+    const state = await lineageState(factory);
+    expect(state.metadata).toEqual([
+      expect.objectContaining({ slot: "active", storageKey: incomingKey }),
+    ]);
+    expect(
+      state.records.every(({ storageKey }) => storageKey === incomingKey),
+    ).toBe(true);
+  });
+
+  it("replaces a previous inactive generation while staging the next one", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    await seedLineage(factory, "incoming", "obsolete incoming", incomingKey);
+
+    await expect(
+      replaceActiveSnapshot(
+        "not valid JSON",
+        new AbortController().signal,
+        factory,
+        IDBKeyRange,
+        fixedCrypto(replacementKey),
+      ),
+    ).rejects.toMatchObject({ kind: "invalid-json" });
+
+    const state = await lineageState(factory);
+    expect(state.metadata).toEqual([
+      expect.objectContaining({ slot: "active", storageKey: activeKey }),
+      expect.objectContaining({
+        slot: "incoming",
+        storageKey: replacementKey,
+      }),
+    ]);
+    expect(recordsFor(state, incomingKey)).toEqual([]);
+    expect(recordsFor(state, replacementKey)).not.toEqual([]);
+  });
+
+  it("validates the staged bytes rather than the downloaded string", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    const before = await lineageState(factory);
+    let writes = 0;
+    const transaction = vi
+      .spyOn(FakeIDBDatabase.prototype, "transaction")
+      .mockImplementation(function (this: IDBDatabase, ...args) {
+        const result = Reflect.apply(
+          originalTransaction,
+          this,
+          args,
+        ) as IDBTransaction;
+        if (args[1] === "readwrite" && ++writes === 1) {
+          result.addEventListener(
+            "complete",
+            () => {
+              const corruption = Reflect.apply(originalTransaction, this, [
+                lineageRecordsStoreName,
+                "readwrite",
+              ]) as IDBTransaction;
+              corruption.objectStore(lineageRecordsStoreName).put({
+                storageKey: incomingKey,
+                index: 0,
+                bytes: new TextEncoder().encode("corrupt"),
+              });
+            },
+            { once: true },
+          );
+        }
+        return result;
+      });
+
+    await expect(
+      replaceActiveSnapshot(
+        minimalSnapshot(),
+        new AbortController().signal,
+        factory,
+        IDBKeyRange,
+        fixedCrypto(incomingKey),
+      ),
+    ).rejects.toMatchObject({ kind: "storage" });
+    transaction.mockRestore();
+
+    const after = await lineageState(factory);
+    expect(recordsFor(after, activeKey)).toEqual(recordsFor(before, activeKey));
+    expect(after.metadata).toContainEqual(
+      expect.objectContaining({ slot: "incoming", storageKey: incomingKey }),
+    );
+  });
+
+  it.each([
+    ["invalid-json", "not valid JSON"],
+    ["invalid-contract", JSON.stringify({})],
+    [
+      "unsupported-version",
+      JSON.stringify({
+        schemaVersion: 2,
+        lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
+        observedAt: "2026-07-26T12:00:00Z",
+        boards: { state: "failed" },
+      }),
+    ],
+  ] as const)(
+    "keeps %s candidates staged and the old active bytes untouched",
+    async (kind, serialized) => {
+      const factory = new IDBFactory();
+      await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+      const before = await lineageState(factory);
+
+      await expect(
+        replaceActiveSnapshot(
+          serialized,
+          new AbortController().signal,
+          factory,
+          IDBKeyRange,
+          fixedCrypto(incomingKey),
+        ),
+      ).rejects.toMatchObject({ kind });
+
+      const after = await lineageState(factory);
+      expect(after.metadata).toEqual([
+        expect.objectContaining({ slot: "active", storageKey: activeKey }),
+        expect.objectContaining({ slot: "incoming", storageKey: incomingKey }),
+      ]);
+      expect(recordsFor(after, activeKey)).toEqual(
+        recordsFor(before, activeKey),
+      );
+      expect(
+        (await loadActiveSnapshot(factory, IDBKeyRange, crypto))?.lineageId,
+      ).toBe("01J1YQ7Y0M4S6R8T2V3W5X7Y9Z");
+    },
+  );
+
+  it.each([
+    ["quota", new DOMException("private", "QuotaExceededError")],
+    ["storage", new DOMException("private", "UnknownError")],
+  ] as const)(
+    "classifies %s before staging without touching active",
+    async (kind, failure) => {
+      const factory = new IDBFactory();
+      await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+      const before = await lineageState(factory);
+      const transaction = vi
+        .spyOn(FakeIDBDatabase.prototype, "transaction")
+        .mockImplementationOnce(function (this: IDBDatabase, ...args) {
+          return Reflect.apply(
+            originalTransaction,
+            this,
+            args,
+          ) as IDBTransaction;
+        })
+        .mockImplementationOnce(() => {
+          throw failure;
+        });
+
+      await expect(
+        replaceActiveSnapshot(
+          minimalSnapshot(),
+          new AbortController().signal,
+          factory,
+          IDBKeyRange,
+          fixedCrypto(incomingKey),
+        ),
+      ).rejects.toMatchObject({ kind, cause: failure });
+
+      transaction.mockRestore();
+      expect(await lineageState(factory)).toEqual(before);
+    },
+  );
+
+  it("rolls back an activation failure while retaining the validated incoming generation", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    const before = await lineageState(factory);
+    let writes = 0;
+    const transaction = vi
+      .spyOn(FakeIDBDatabase.prototype, "transaction")
+      .mockImplementation(function (this: IDBDatabase, ...args) {
+        const result = Reflect.apply(
+          originalTransaction,
+          this,
+          args,
+        ) as IDBTransaction;
+        if (args[1] === "readwrite" && ++writes === 2) {
+          queueMicrotask(() => result.abort());
+        }
+        return result;
+      });
+
+    await expect(
+      replaceActiveSnapshot(
+        olderSameIdSnapshot(),
+        new AbortController().signal,
+        factory,
+        IDBKeyRange,
+        fixedCrypto(incomingKey),
+      ),
+    ).rejects.toBeInstanceOf(SnapshotReplacementError);
+    transaction.mockRestore();
+
+    const after = await lineageState(factory);
+    expect(after.metadata).toEqual([
+      expect.objectContaining({ slot: "active", storageKey: activeKey }),
+      expect.objectContaining({ slot: "incoming", storageKey: incomingKey }),
+    ]);
+    expect(recordsFor(after, activeKey)).toEqual(recordsFor(before, activeKey));
+  });
+
+  it("lets an active read captured before promotion finish from the old generation", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    const digestStarted = deferred<void>();
+    const continueDigest = deferred<void>();
+    const delayedCrypto = {
+      subtle: {
+        async digest(algorithm: AlgorithmIdentifier, data: BufferSource) {
+          digestStarted.resolve();
+          await continueDigest.promise;
+          return crypto.subtle.digest(algorithm, data);
+        },
+      } as SubtleCrypto,
+    };
+
+    const oldRead = loadActiveSnapshot(factory, IDBKeyRange, delayedCrypto);
+    await digestStarted.promise;
+    await replaceActiveSnapshot(
+      olderSameIdSnapshot(),
+      new AbortController().signal,
+      factory,
+      IDBKeyRange,
+      fixedCrypto(incomingKey),
+    );
+    continueDigest.resolve();
+
+    expect((await oldRead)?.observedAt).toBe("2026-07-26T12:00:00Z");
+    expect(
+      (await loadActiveSnapshot(factory, IDBKeyRange, crypto))?.observedAt,
+    ).toBe("2026-07-25T12:00:00Z");
+  });
+});
+
+describe("replacement cancellation and connection ownership", () => {
+  it("does not open when already aborted and preserves the exact reason", async () => {
+    const reason = { stage: "before-open" };
+    const controller = new AbortController();
+    controller.abort(reason);
+    const factory = { open: vi.fn() } as unknown as IDBFactory;
+
+    await expectExactReason(
+      replaceActiveSnapshot(
+        minimalSnapshot(),
+        controller.signal,
+        factory,
+        IDBKeyRange,
+        fixedCrypto(incomingKey),
+      ),
+      reason,
+    );
+    expect(factory.open).not.toHaveBeenCalled();
+  });
+
+  it("closes a late successful open after pending cancellation", async () => {
+    const close = vi.fn();
+    const request = { result: { close } } as unknown as IDBOpenDBRequest;
+    const factory = { open: vi.fn(() => request) } as unknown as IDBFactory;
+    const controller = new AbortController();
+    const reason = new Error("pending open canceled");
+    const replacement = replaceActiveSnapshot(
+      minimalSnapshot(),
+      controller.signal,
+      factory,
+      IDBKeyRange,
+      fixedCrypto(incomingKey),
+    );
+
+    controller.abort(reason);
+    await expectExactReason(replacement, reason);
+    request.onsuccess?.call(request, new Event("success"));
+
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it.each([1, 2])(
+    "rolls back and preserves the exact reason during write transaction %i",
+    async (targetWrite) => {
+      const factory = new IDBFactory();
+      await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+      const before = await lineageState(factory);
+      const controller = new AbortController();
+      const reason = { targetWrite };
+      let writes = 0;
+      const transaction = vi
+        .spyOn(FakeIDBDatabase.prototype, "transaction")
+        .mockImplementation(function (this: IDBDatabase, ...args) {
+          const result = Reflect.apply(
+            originalTransaction,
+            this,
+            args,
+          ) as IDBTransaction;
+          if (args[1] === "readwrite" && ++writes === targetWrite) {
+            queueMicrotask(() => controller.abort(reason));
+          }
+          return result;
+        });
+
+      await expectExactReason(
+        replaceActiveSnapshot(
+          olderSameIdSnapshot(),
+          controller.signal,
+          factory,
+          IDBKeyRange,
+          fixedCrypto(incomingKey),
+        ),
+        reason,
+      );
+      transaction.mockRestore();
+
+      const after = await lineageState(factory);
+      expect(recordsFor(after, activeKey)).toEqual(
+        recordsFor(before, activeKey),
+      );
+      expect(
+        after.metadata.find(({ slot }) => slot === "active"),
+      ).toMatchObject({
+        storageKey: activeKey,
+      });
+      if (targetWrite === 1) {
+        expect(after.metadata).toHaveLength(1);
+      } else {
+        expect(after.metadata).toContainEqual(
+          expect.objectContaining({
+            slot: "incoming",
+            storageKey: incomingKey,
+          }),
+        );
+      }
+    },
+  );
+
+  it("preserves a committed incoming generation when canceled after stage", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    const controller = new AbortController();
+    const reason = { stage: "after-stage" };
+    let writes = 0;
+    const transaction = vi
+      .spyOn(FakeIDBDatabase.prototype, "transaction")
+      .mockImplementation(function (this: IDBDatabase, ...args) {
+        const result = Reflect.apply(
+          originalTransaction,
+          this,
+          args,
+        ) as IDBTransaction;
+        if (args[1] === "readwrite" && ++writes === 1) {
+          result.addEventListener("complete", () => controller.abort(reason), {
+            once: true,
+          });
+        }
+        return result;
+      });
+
+    await expectExactReason(
+      replaceActiveSnapshot(
+        olderSameIdSnapshot(),
+        controller.signal,
+        factory,
+        IDBKeyRange,
+        fixedCrypto(incomingKey),
+      ),
+      reason,
+    );
+    transaction.mockRestore();
+
+    expect((await lineageState(factory)).metadata).toEqual([
+      expect.objectContaining({ slot: "active", storageKey: activeKey }),
+      expect.objectContaining({ slot: "incoming", storageKey: incomingKey }),
+    ]);
+  });
+
+  it("preserves the exact reason when canceled during staged digest validation", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    const controller = new AbortController();
+    const reason = { stage: "validation-digest" };
+    let digests = 0;
+    const cryptoApi = {
+      randomUUID: () =>
+        incomingKey as `${string}-${string}-${string}-${string}-${string}`,
+      subtle: {
+        async digest(algorithm: AlgorithmIdentifier, data: BufferSource) {
+          const result = await crypto.subtle.digest(algorithm, data);
+          if (++digests === 2) {
+            controller.abort(reason);
+          }
+          return result;
+        },
+      } as SubtleCrypto,
+    };
+
+    await expectExactReason(
+      replaceActiveSnapshot(
+        olderSameIdSnapshot(),
+        controller.signal,
+        factory,
+        IDBKeyRange,
+        cryptoApi,
+      ),
+      reason,
+    );
+
+    expect((await lineageState(factory)).metadata).toContainEqual(
+      expect.objectContaining({ slot: "incoming", storageKey: incomingKey }),
+    );
+  });
+
+  it("does not start activation when canceled after validation capture", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    const controller = new AbortController();
+    const reason = { stage: "after-validation-capture" };
+    let readonlyTransactions = 0;
+    let writeTransactions = 0;
+    const transaction = vi
+      .spyOn(FakeIDBDatabase.prototype, "transaction")
+      .mockImplementation(function (this: IDBDatabase, ...args) {
+        const result = Reflect.apply(
+          originalTransaction,
+          this,
+          args,
+        ) as IDBTransaction;
+        if (args[1] === "readonly" && ++readonlyTransactions === 2) {
+          result.addEventListener("complete", () => controller.abort(reason), {
+            once: true,
+          });
+        }
+        if (args[1] === "readwrite") {
+          writeTransactions += 1;
+        }
+        return result;
+      });
+
+    await expectExactReason(
+      replaceActiveSnapshot(
+        olderSameIdSnapshot(),
+        controller.signal,
+        factory,
+        IDBKeyRange,
+        fixedCrypto(incomingKey),
+      ),
+      reason,
+    );
+    transaction.mockRestore();
+
+    expect(writeTransactions).toBe(1);
+    expect((await lineageState(factory)).metadata).toContainEqual(
+      expect.objectContaining({ slot: "incoming", storageKey: incomingKey }),
+    );
+  });
+
+  it("lets activation commit win cancellation observed at completion", async () => {
+    const factory = new IDBFactory();
+    await seedLineage(factory, "active", minimalSnapshot(), activeKey);
+    const controller = new AbortController();
+    const reason = { stage: "activation-complete" };
+    let writes = 0;
+    const transaction = vi
+      .spyOn(FakeIDBDatabase.prototype, "transaction")
+      .mockImplementation(function (this: IDBDatabase, ...args) {
+        const result = Reflect.apply(
+          originalTransaction,
+          this,
+          args,
+        ) as IDBTransaction;
+        if (args[1] === "readwrite" && ++writes === 2) {
+          result.addEventListener("complete", () => controller.abort(reason), {
+            once: true,
+          });
+        }
+        return result;
+      });
+
+    const snapshot = await replaceActiveSnapshot(
+      olderSameIdSnapshot(),
+      controller.signal,
+      factory,
+      IDBKeyRange,
+      fixedCrypto(incomingKey),
+    );
+    transaction.mockRestore();
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(snapshot.observedAt).toBe("2026-07-25T12:00:00Z");
+    expect((await lineageState(factory)).metadata).toEqual([
+      expect.objectContaining({ slot: "active", storageKey: incomingKey }),
+    ]);
+  });
+
+  it("removes every signal listener and closes its transferred connection", async () => {
+    const factory = new IDBFactory();
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, "addEventListener");
+    const remove = vi.spyOn(controller.signal, "removeEventListener");
+    const close = vi.spyOn(FakeIDBDatabase.prototype, "close");
+
+    await replaceActiveSnapshot(
+      minimalSnapshot(),
+      controller.signal,
+      factory,
+      IDBKeyRange,
+      fixedCrypto(incomingKey),
+    );
+
+    expect(remove.mock.calls.filter(([type]) => type === "abort")).toHaveLength(
+      add.mock.calls.filter(([type]) => type === "abort").length,
+    );
+    expect(close).toHaveBeenCalledOnce();
+    add.mockRestore();
+    remove.mockRestore();
+    close.mockRestore();
+  });
+});
+
 describe("startup ownership and corruption audit", () => {
   it("rejects missing IndexedDB and preserves unavailable causes", async () => {
     await expect(
@@ -411,6 +973,64 @@ describe("startup ownership and corruption audit", () => {
     },
   );
 });
+
+async function lineageState(factory: IDBFactory): Promise<{
+  readonly metadata: LineageDescriptor[];
+  readonly records: LineageRecord[];
+}> {
+  const database = await openSnapshotDatabase(factory);
+  const transaction = database.transaction(
+    [lineageMetadataStoreName, lineageRecordsStoreName],
+    "readonly",
+  );
+  const done = transactionDone(transaction);
+  const metadata = transaction
+    .objectStore(lineageMetadataStoreName)
+    .getAll() as IDBRequest<LineageDescriptor[]>;
+  const records = transaction
+    .objectStore(lineageRecordsStoreName)
+    .getAll() as IDBRequest<LineageRecord[]>;
+  await done;
+  database.close();
+  return { metadata: metadata.result, records: records.result };
+}
+
+function recordsFor(
+  state: { readonly records: readonly LineageRecord[] },
+  storageKey: string,
+): readonly LineageRecord[] {
+  return state.records.filter((record) => record.storageKey === storageKey);
+}
+
+function fixedCrypto(
+  storageKey: string,
+): Pick<Crypto, "randomUUID" | "subtle"> {
+  return {
+    randomUUID: () =>
+      storageKey as `${string}-${string}-${string}-${string}-${string}`,
+    subtle: crypto.subtle,
+  };
+}
+
+async function expectExactReason(
+  promise: Promise<unknown>,
+  reason: unknown,
+): Promise<void> {
+  try {
+    await promise;
+    throw new Error("expected cancellation");
+  } catch (cause) {
+    expect(cause).toBe(reason);
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
 
 async function expectCorrupt(factory: IDBFactory): Promise<void> {
   await expect(
@@ -666,6 +1286,15 @@ function minimalSnapshot(): string {
     schemaVersion: 1,
     lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
     observedAt: "2026-07-26T12:00:00Z",
+    boards: { state: "failed" },
+  });
+}
+
+function olderSameIdSnapshot(): string {
+  return JSON.stringify({
+    schemaVersion: 1,
+    lineageId: "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
+    observedAt: "2026-07-25T12:00:00Z",
     boards: { state: "failed" },
   });
 }
