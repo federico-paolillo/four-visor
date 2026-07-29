@@ -80,7 +80,11 @@ describe("Service Worker event wiring", () => {
       new Request(`${origin}/api/snapshot`),
       new Request(`${origin}/index.html?refresh=1`),
       new Request(`${origin}/boards/g`),
-      new Request("https://i.4cdn.org/g/1.jpg"),
+      new Request("https://i.4cdn.org/g/1721234567890s.jpg"),
+      new Request("https://i.4cdn.org/g/1721234567890.jpg"),
+      new Request("https://i.4cdn.org/g/1721234567890.webm"),
+      new Request("https://i.4cdn.org/g/1721234567890.mp3"),
+      new Request("https://i.4cdn.org/g/1721234567890.pdf"),
       new Request(`${origin}/index.html`, { method: "POST" }),
     ]) {
       const bypassRespondWith = vi.fn();

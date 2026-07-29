@@ -3,9 +3,26 @@
 import type { OpaqueObject } from "./snapshot";
 
 export const canonical4chanOrigin = "https://boards.4chan.org";
+export const canonical4chanMediaOrigin = "https://i.4cdn.org";
 
 const boardIdentifierPattern = /^[a-z0-9]+$/;
 const semanticPathPattern = /^[a-z0-9-]+$/;
+const mediaExtensionPattern = /^\.[a-z0-9]+$/;
+const imageExtensions = new Set([".gif", ".jpg", ".png"]);
+const videoExtensions = new Set([".mp4", ".webm"]);
+const audioExtensions = new Set([".flac", ".mp3", ".ogg", ".wav"]);
+
+export type CanonicalPostMedia = {
+  readonly filename: string;
+  readonly fullURL: string;
+  readonly height: number;
+  readonly kind: "audio" | "file" | "image" | "video";
+  readonly spoiler: boolean;
+  readonly thumbnailHeight: number;
+  readonly thumbnailURL: string;
+  readonly thumbnailWidth: number;
+  readonly width: number;
+};
 
 // canonicalBoardURL accepts only a board belonging to the canonical HTTPS origin.
 export function canonicalBoardURL(board: OpaqueObject): string | undefined {
@@ -59,9 +76,56 @@ export function canonicalPostURL(
   return canonicalURL(`/${board}/thread/${threadNumber}${fragment}`);
 }
 
+// canonicalPostMedia derives original 4cdn URLs only from a complete validated attachment shape.
+export function canonicalPostMedia(
+  board: OpaqueObject,
+  post: OpaqueObject,
+): CanonicalPostMedia | undefined {
+  const identifier = textField(board, "board");
+  const timestamp = positiveInteger(fieldValue(post, "tim"));
+  const extension = textField(post, "ext");
+  const filename = textField(post, "filename");
+  const width = positiveInteger(fieldValue(post, "w"));
+  const height = positiveInteger(fieldValue(post, "h"));
+  const thumbnailWidth = positiveInteger(fieldValue(post, "tn_w"));
+  const thumbnailHeight = positiveInteger(fieldValue(post, "tn_h"));
+  const spoilerField = Object.getOwnPropertyDescriptor(post, "spoiler");
+  if (
+    identifier === undefined ||
+    !boardIdentifierPattern.test(identifier) ||
+    timestamp === undefined ||
+    extension === undefined ||
+    !mediaExtensionPattern.test(extension) ||
+    filename === undefined ||
+    width === undefined ||
+    height === undefined ||
+    thumbnailWidth === undefined ||
+    thumbnailHeight === undefined ||
+    (spoilerField !== undefined && spoilerField.value !== 1)
+  ) {
+    return undefined;
+  }
+
+  return {
+    filename: `${filename}${extension}`,
+    fullURL: canonicalMediaURL(`/${identifier}/${timestamp}${extension}`),
+    height,
+    kind: mediaKind(extension),
+    spoiler: spoilerField !== undefined,
+    thumbnailHeight,
+    thumbnailURL: canonicalMediaURL(`/${identifier}/${timestamp}s.jpg`),
+    thumbnailWidth,
+    width,
+  };
+}
+
 function textField(object: OpaqueObject, field: string): string | undefined {
-  const value = object[field];
+  const value = fieldValue(object, field);
   return typeof value === "string" && value.trim() !== "" ? value : undefined;
+}
+
+function fieldValue(object: OpaqueObject, field: string): unknown {
+  return Object.getOwnPropertyDescriptor(object, field)?.value;
 }
 
 function positiveInteger(value: unknown): number | undefined {
@@ -75,4 +139,18 @@ function canonicalURL(path: string): string | undefined {
   return url.protocol === "https:" && url.origin === canonical4chanOrigin
     ? url.href
     : undefined;
+}
+
+function canonicalMediaURL(path: string): string {
+  return new URL(path, canonical4chanMediaOrigin).href;
+}
+
+function mediaKind(extension: string): "audio" | "file" | "image" | "video" {
+  if (imageExtensions.has(extension)) {
+    return "image";
+  }
+  if (videoExtensions.has(extension)) {
+    return "video";
+  }
+  return audioExtensions.has(extension) ? "audio" : "file";
 }

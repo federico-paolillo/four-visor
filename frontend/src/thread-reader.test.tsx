@@ -270,6 +270,83 @@ describe("selection and collapse lifetime", () => {
     expect(pushState).not.toHaveBeenCalled();
     expect(replaceState).not.toHaveBeenCalled();
   });
+
+  it("keeps media state with its thread DOM and resets it at selection and lineage boundaries", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const root = mount(
+      <App
+        state={{ kind: "ready", snapshot: mediaSnapshot }}
+        onReset={async () => {}}
+      />,
+    );
+
+    await click(root, "No. 100 · Media");
+    expect(root.textContent).toContain("persistent text");
+    expect(root.textContent).toContain("Reveal spoiler media");
+    expect(root.querySelector("[src]")).toBeNull();
+
+    await click(root, "Reveal spoiler media");
+    expect(root.textContent).toContain("persistent text");
+    expect(root.textContent).toContain("Media unavailable or offline.");
+    await click(root, "Retry media");
+    expect(root.querySelector("img")?.src).toBe(
+      "https://i.4cdn.org/g/1721234567890s.jpg",
+    );
+    await click(root, "Load full image");
+    expect([...root.querySelectorAll("img")].map(({ src }) => src)).toContain(
+      "https://i.4cdn.org/g/1721234567890.jpg",
+    );
+
+    const details = root.querySelector("details");
+    details?.querySelector("summary")?.click();
+    expect(details?.open).toBe(false);
+    expect(root.textContent).not.toContain("Reveal spoiler media");
+    expect(root.textContent).toContain("persistent text");
+
+    act(() =>
+      render(
+        <App
+          state={{
+            kind: "synchronizing",
+            snapshot: { ...mediaSnapshot },
+          }}
+          onReset={async () => {}}
+        />,
+        root,
+      ),
+    );
+    expect(root.querySelector("details")?.open).toBe(false);
+    expect(root.textContent).not.toContain("Reveal spoiler media");
+    expect(root.textContent).toContain("persistent text");
+
+    await click(root, "No. 101 · Other");
+    await click(root, "No. 100 · Media");
+    expect(root.textContent).toContain("Reveal spoiler media");
+    expect(root.querySelector("[src]")).toBeNull();
+
+    act(() =>
+      render(
+        <App
+          state={{
+            kind: "ready",
+            snapshot: {
+              ...mediaSnapshot,
+              lineageId: replacementLineageID,
+            },
+          }}
+          onReset={async () => {}}
+        />,
+        root,
+      ),
+    );
+    expect(root.querySelector("details")).toBeNull();
+    await click(root, "No. 100 · Media");
+    expect(root.textContent).toContain("Reveal spoiler media");
+    expect(root.textContent).toContain("persistent text");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
 });
 
 function presentEntry(posts: readonly OpaqueObject[]): ThreadEntry {
@@ -346,3 +423,52 @@ const snapshot: SnapshotV1 = {
 };
 
 const replacementLineageID = "01J1YQ7Y0M4S6R8T2V3W5X7Y8Y";
+
+const mediaSnapshot: SnapshotV1 = {
+  ...snapshot,
+  boards: {
+    state: "present",
+    items: [
+      {
+        board,
+        catalog: {
+          state: "present",
+          pages: [
+            {
+              metadata: { page: 1 },
+              threads: [
+                {
+                  summary: { no: 100, sub: "Media" },
+                  thread: {
+                    state: "present",
+                    posts: [
+                      {
+                        no: 100,
+                        com: "<b>persistent text</b>",
+                        ext: ".jpg",
+                        filename: "example",
+                        h: 720,
+                        spoiler: 1,
+                        tim: 1_721_234_567_890,
+                        tn_h: 125,
+                        tn_w: 111,
+                        w: 1280,
+                      },
+                    ],
+                  },
+                },
+                {
+                  summary: { no: 101, sub: "Other" },
+                  thread: {
+                    state: "present",
+                    posts: [{ no: 101, com: "other body" }],
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  },
+};

@@ -2,6 +2,7 @@
 
 import { canonicalPostURL, canonicalThreadURL } from "./fourchan-url";
 import { PostMarkup, postQuoteNumbers } from "./post-markup";
+import { PostMedia } from "./post-media";
 import type { OpaqueObject, ThreadEntry } from "./snapshot";
 
 const maximumReplyDepth = 6;
@@ -188,6 +189,7 @@ function Post({
               thread={context.thread}
             />
           )}
+          <PostMedia board={board} post={post} />
           <CanonicalLink href={href} label="Open post on 4chan" />
         </div>
       </details>
