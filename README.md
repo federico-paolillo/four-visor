@@ -508,6 +508,12 @@ synchronization logic.
 
 ## Verification
 
+Backend tests require a locally reachable Docker-compatible API socket that the
+current user can access without `sudo`, plus registry access to pull the pinned
+Memcached image. A remote daemon is unsupported because test ports bind only to
+the Docker host's `127.0.0.1`. Unavailable Docker access or image pulling fails
+the backend tests rather than skipping them.
+
 ### Backend
 
 > Run these Mise-en-Place tasks to verify backend

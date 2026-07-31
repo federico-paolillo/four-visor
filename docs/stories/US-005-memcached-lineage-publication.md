@@ -50,5 +50,5 @@ The Reader sees either the last complete server snapshot or the next complete on
 
 ## Validation
 
-- Integration-test publication against Memcached, with injected failure after each write phase and concurrent readers observing the pointer.
-- Unit-test deterministic blocking/reassembly, TTL calculation, pointer preservation, and eviction-key selection.
+- Integration-test successful publication, replacement, old-lineage cleanup, and no-eviction pressure against fresh Memcached instances.
+- Unit-test injected failures, concurrent readers, deterministic blocking/reassembly, TTL calculation, pointer preservation, and eviction-key selection.

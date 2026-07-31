@@ -148,6 +148,9 @@ other short-lived work.
   obvious failure paths.
 - Use ports in range 65100-65199 for Docker Compose, Docker Containers and
   services in general
+- Test-only containers may use dependency-native container ports and
+  Docker-assigned ephemeral host ports, but every published test port must bind
+  explicitly to `127.0.0.1`.
 - Leave one line of comment for each module to explain what it does and why it
   exists.
 - Do not write or provide smoke tests. Limit yourself to unit and integration
@@ -195,6 +198,9 @@ other short-lived work.
   obvious failure paths. Do not require excessive hardening.
 - Flag ports not in range 65100-65199 for Docker Compose, Docker Containers and
   services in general
+- Test-only containers may use dependency-native container ports and
+  Docker-assigned ephemeral host ports, but every published test port must bind
+  explicitly to `127.0.0.1`.
 - Do not demand smoke tests. Limit yourself to unit and integration tests.
 - Do not demand end-to-end tests. Limit yourself to unit and integration tests.
 - Do not demand deployment smoke tests. Limit yourself to unit and integrations

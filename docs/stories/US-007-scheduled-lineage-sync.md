@@ -53,5 +53,4 @@ The Reader receives regularly refreshed snapshots even when some upstream resour
 
 ## Validation
 
-- Unit-test stable jitter range/reuse, overlap-tick skipping and its event, ULID/time assignment, threshold classification, cancellation, and next-interval behavior with a fake clock.
-- Integration-test complete, degraded, total-outage, board/catalog/thread deadline, external cancellation, publication-failure, and cache-loss runs through the acquisition and Memcached boundaries, asserting pointer and telemetry outcomes.
+- Unit-test stable jitter range/reuse, overlap-tick skipping and its event, ULID/time assignment, threshold classification, complete/degraded/outage outcomes, deadlines, cancellation, publication failure, cache loss, and next-interval behavior with fakes.

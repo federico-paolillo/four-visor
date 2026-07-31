@@ -49,5 +49,5 @@ The Reader can download one complete JSON snapshot, while an unavailable or expi
 
 ## Validation
 
-- Integration-test `200` reconstruction and each `410` missing-component case against Memcached.
-- Unit-test method/route behavior, cancellation, serialization failure, telemetry attributes, and absence of application-level Brotli.
+- Integration-test exact `200` reconstruction against a fresh Memcached instance.
+- Unit-test missing and corrupt components, method/route behavior, cancellation, serialization failure, telemetry attributes, and absence of application-level Brotli.
