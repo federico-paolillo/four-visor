@@ -10,11 +10,11 @@ The Operator can explain a failed request or degraded lineage from one trace whi
 
 ## Scope
 
-- Configure the internal OpenTelemetry Collector to receive backend OTLP telemetry, export minimal metrics/logs, and perform tail-based trace sampling.
-- Own and validate the Collector receiver, pipeline, filtering, tail-sampling, and exporter semantics; reuse the service wiring introduced by US-017.
+- Configure the Go SDK to enforce the application metric/log policy and the internal OpenTelemetry Collector to receive backend OTLP telemetry and perform tail-based trace sampling.
+- Own and validate the SDK catalogue/View/log wrapper plus the Collector receiver, memory, batching, tail-sampling, authentication, and exporter semantics; reuse the service wiring introduced by US-017.
 - Retain every trace containing an error and approximately 10% of fully successful traces; perform no application-side sampling.
 - Verify, without reimplementing accepted instrumentation, that inbound request and scheduled synchronization root traces from earlier stories contain the required outbound HTTP, Memcached, validation/serialization, construction, activation, and eviction children where applicable.
-- Export only the enumerated low-cardinality HTTP/cache/lineage metrics and meaningful lifecycle/error logs.
+- Export only the enumerated low-cardinality HTTP/cache/lineage metrics and meaningful lifecycle/error logs through one authenticated Grafana Cloud OTLP/HTTP destination.
 - Keep Caddy and third-party container stdout outside the Go OpenTelemetry contract; Collector/exporter failure must not fail application operations.
 - Document signal names/attributes, how to locate a degraded sync by lineage ULID, exporter configuration, expected single-node gaps, and a concise operator troubleshooting flow.
 
@@ -44,12 +44,12 @@ The Operator can explain a failed request or degraded lineage from one trace whi
 
 1. Collector configuration receives OTLP from the backend and tail-samples 100% of traces containing an error plus approximately 10% of fully successful traces; backend SDK sampling is always-on/deferred to Collector.
 2. Representative successful and failed `/health`, `/snapshot`, and scheduled-sync traces have one root and the applicable required child operations with errors propagated to relevant parents.
-3. Exported metrics are limited to HTTP request/latency, cache operation/hit/miss/error/latency, synchronization duration/outcome, failed-resource count, and active-lineage age; forbidden identifiers/raw values are absent from labels.
-4. Exported logs contain meaningful lineage lifecycle/acquisition summaries and all errors, but no routine successful request, successful cache GET, successful outbound request, or individual cache-hit chatter.
+3. One typed Go SDK catalogue defines the ten allowed metrics and one catch-all View drops unknown or wrong-kind instruments while filtering datapoint attributes; trace exemplars and both service resource identifiers remain available.
+4. The Go logger filters only OTLP to meaningful lineage lifecycle/acquisition summaries and all Error+ records with allowed attributes; stderr stays unfiltered.
 5. Collector/exporter unavailability leaves health, snapshot serving, and synchronization behavior unchanged apart from lost telemetry.
 6. Operator documentation can locate an excessive-degradation trace from lineage ID and explains expected personal-grade telemetry gaps without promising audit/SLO capabilities.
 
 ## Validation
 
-- Integration-test backend telemetry through an in-process or test Collector pipeline with synthetic successful/failed traces, asserting child structure, filtering, metric label sets, and failure non-interference.
-- Validate Collector configuration and tail-sampling policy deterministically; do not perform deployment or external-backend tests.
+- Integration-test backend telemetry through a test Collector pipeline with synthetic successful/failed traces, asserting tail sampling, catalogue metrics, unknown/wrong-kind drops, resource identity, OTLP filtering, unfiltered stderr, and failure non-interference.
+- Validate the Collector configuration and tail-sampling policy deterministically against a local capture Collector; do not contact Grafana Cloud or perform deployment/external-backend tests.

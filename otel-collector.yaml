@@ -4,7 +4,17 @@ receivers:
       grpc:
         endpoint: 0.0.0.0:65103
 
+extensions:
+  basicauth/grafana_cloud:
+    client_auth:
+      username: ${env:GRAFANA_CLOUD_INSTANCE_ID}
+      password: ${env:GRAFANA_CLOUD_API_KEY}
+
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
   tail_sampling:
     sampling_strategy: trace-complete
     decision_wait: 40m
@@ -20,52 +30,13 @@ processors:
         type: probabilistic
         probabilistic:
           sampling_percentage: 10
-  filter/metrics:
-    error_mode: propagate
-    metric_conditions:
-      - 'metric.name != "http.server.request.count" and metric.name != "http.server.request.duration" and metric.name != "http.client.request.count" and metric.name != "http.client.request.duration" and metric.name != "cache.operation.count" and metric.name != "cache.operation.duration" and metric.name != "lineage.synchronization.duration" and metric.name != "lineage.synchronization.activated" and metric.name != "lineage.failed_resource.count" and metric.name != "lineage.active.age"'
-      - '(metric.name == "http.server.request.count" or metric.name == "http.client.request.count" or metric.name == "cache.operation.count" or metric.name == "lineage.synchronization.activated") and metric.type != METRIC_DATA_TYPE_SUM'
-      - '(metric.name == "http.server.request.duration" or metric.name == "http.client.request.duration" or metric.name == "cache.operation.duration" or metric.name == "lineage.synchronization.duration" or metric.name == "lineage.failed_resource.count") and metric.type != METRIC_DATA_TYPE_HISTOGRAM'
-      - 'metric.name == "lineage.active.age" and metric.type != METRIC_DATA_TYPE_GAUGE'
-  filter/logs:
-    error_mode: propagate
-    log_conditions:
-      - 'log.severity_number < SEVERITY_NUMBER_ERROR and log.body != "synchronization started" and log.body != "outbound acquisition completed" and log.body != "lineage activated" and log.body != "previous lineage evicted" and log.body != "synchronization completed" and log.body != "oversized thread detected" and log.body != "synchronization tick skipped"'
-  transform/allowlisted_attributes:
-    error_mode: propagate
-    metric_statements:
-      - 'keep_keys(resource.attributes, ["service.name"])'
-      - 'keep_keys(datapoint.attributes, ["http.request.method", "http.route", "http.response.status_code"]) where metric.name == "http.server.request.count" or metric.name == "http.server.request.duration"'
-      - 'keep_keys(datapoint.attributes, ["resource.type", "error.type", "http.response.status_code"]) where metric.name == "http.client.request.count" or metric.name == "http.client.request.duration"'
-      - 'keep_keys(datapoint.attributes, ["cache.operation", "cache.outcome"]) where metric.name == "cache.operation.count" or metric.name == "cache.operation.duration"'
-      - 'keep_keys(datapoint.attributes, ["lineage.outcome"]) where metric.name == "lineage.synchronization.duration" or metric.name == "lineage.synchronization.activated"'
-      - 'delete_matching_keys(datapoint.attributes, ".*") where metric.name == "lineage.failed_resource.count" or metric.name == "lineage.active.age"'
-    log_statements:
-      - 'keep_keys(log.attributes, ["dependency", "scheduler.reason", "lineage.id", "lineage.observed_at", "lineage.outcome", "lineage.degradation.excessive", "resource.type", "resource.state", "resource.board.count", "resource.catalog.count", "resource.thread.count", "resource.failed.count", "resource.failed.tolerance", "posts.limit", "error.type", "error.cause.type"])'
+  batch:
 
 exporters:
-  otlp_grpc/traces:
-    endpoint: ${env:OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}
-    tls:
-      insecure: true
-    timeout: 5s
-    retry_on_failure:
-      enabled: false
-    sending_queue:
-      enabled: false
-  otlp_grpc/metrics:
-    endpoint: ${env:OTEL_EXPORTER_OTLP_METRICS_ENDPOINT}
-    tls:
-      insecure: true
-    timeout: 5s
-    retry_on_failure:
-      enabled: false
-    sending_queue:
-      enabled: false
-  otlp_grpc/logs:
-    endpoint: ${env:OTEL_EXPORTER_OTLP_LOGS_ENDPOINT}
-    tls:
-      insecure: true
+  otlphttp/grafana_cloud:
+    endpoint: ${env:GRAFANA_CLOUD_OTLP_ENDPOINT}
+    auth:
+      authenticator: basicauth/grafana_cloud
     timeout: 5s
     retry_on_failure:
       enabled: false
@@ -73,6 +44,7 @@ exporters:
       enabled: false
 
 service:
+  extensions: [basicauth/grafana_cloud]
   telemetry:
     metrics:
       level: none
@@ -80,13 +52,13 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [tail_sampling]
-      exporters: [otlp_grpc/traces]
+      processors: [memory_limiter, tail_sampling, batch]
+      exporters: [otlphttp/grafana_cloud]
     metrics:
       receivers: [otlp]
-      processors: [filter/metrics, transform/allowlisted_attributes]
-      exporters: [otlp_grpc/metrics]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/grafana_cloud]
     logs:
       receivers: [otlp]
-      processors: [filter/logs, transform/allowlisted_attributes]
-      exporters: [otlp_grpc/logs]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/grafana_cloud]

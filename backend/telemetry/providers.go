@@ -94,9 +94,13 @@ func New(ctx context.Context, endpoint string, stderr io.Writer) (*Providers, er
 	}
 
 	jsonHandler := slog.NewJSONHandler(stderr, nil)
+	otlpHandler := otlpLogHandler{handler: otelslog.NewHandler(
+		serviceName,
+		otelslog.WithLoggerProvider(loggerProvider),
+	)}
 	logger := slog.New(slog.NewMultiHandler(
 		jsonHandler,
-		otelslog.NewHandler(serviceName, otelslog.WithLoggerProvider(loggerProvider)),
+		otlpHandler,
 	))
 
 	providers := &Providers{Tracer: tracerProvider, Meter: meterProvider, Logger: loggerProvider, Slog: logger}
@@ -149,6 +153,7 @@ func newMeterProvider(ctx context.Context, endpoint string, res *resource.Resour
 		metricsdk.WithResource(res),
 		metricsdk.WithExemplarFilter(exemplar.TraceBasedFilter),
 		metricsdk.WithCardinalityLimit(2000),
+		metricsdk.WithView(metricView),
 		metricsdk.WithReader(metricsdk.NewPeriodicReader(exporter,
 			metricsdk.WithInterval(60*time.Second),
 			metricsdk.WithTimeout(30*time.Second),

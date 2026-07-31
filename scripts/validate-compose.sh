@@ -33,9 +33,9 @@ readonly policy_cidfile="$validation_directory/policy.cid"
 readonly -a cidfiles=("$edge_cidfile" "$collector_cidfile" "$capture_cidfile" "$policy_cidfile")
 readonly -a compose_environment=(
 	FOURVISOR_COMMIT_HASH
-	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT
-	OTEL_EXPORTER_OTLP_METRICS_ENDPOINT
-	OTEL_EXPORTER_OTLP_LOGS_ENDPOINT
+	GRAFANA_CLOUD_OTLP_ENDPOINT
+	GRAFANA_CLOUD_INSTANCE_ID
+	GRAFANA_CLOUD_API_KEY
 	FOURVISOR_HEALTH_TIMEOUT
 	FOURVISOR_DNS_NAME
 	FOURVISOR_OTLP_ENDPOINT
@@ -135,16 +135,16 @@ NODE
 
 cat >"$baseline_env" <<'EOF'
 FOURVISOR_COMMIT_HASH=0000000000000000000000000000000000000000
-OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=traces.invalid:65103
-OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=metrics.invalid:65103
-OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=logs.invalid:65103
+GRAFANA_CLOUD_OTLP_ENDPOINT=https://grafana.invalid/otlp
+GRAFANA_CLOUD_INSTANCE_ID=test-instance
+GRAFANA_CLOUD_API_KEY=test-key
 EOF
 
 cat >"$override_env" <<'EOF'
 FOURVISOR_COMMIT_HASH=0000000000000000000000000000000000000000
-OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=traces.invalid:65103
-OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=metrics.invalid:65103
-OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=logs.invalid:65103
+GRAFANA_CLOUD_OTLP_ENDPOINT=https://grafana.invalid/otlp
+GRAFANA_CLOUD_INSTANCE_ID=test-instance
+GRAFANA_CLOUD_API_KEY=test-key
 FOURVISOR_HEALTH_TIMEOUT=750ms
 FOURVISOR_DNS_NAME=boards.4chan.org
 FOURVISOR_OTLP_ENDPOINT=http://otelcol:65103
@@ -273,9 +273,9 @@ assert.deepEqual(services.memcached.command, [
 ]);
 assert.deepEqual(services.otelcol.command, ["--config=/etc/otelcol-contrib/config.yaml"]);
 assert.deepEqual(services.otelcol.environment, {
-  OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: "logs.invalid:65103",
-  OTEL_EXPORTER_OTLP_METRICS_ENDPOINT: "metrics.invalid:65103",
-  OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "traces.invalid:65103",
+  GRAFANA_CLOUD_API_KEY: "test-key",
+  GRAFANA_CLOUD_INSTANCE_ID: "test-instance",
+  GRAFANA_CLOUD_OTLP_ENDPOINT: "https://grafana.invalid/otlp",
 });
 
 assert.deepEqual(services.backend.healthcheck, {
@@ -303,18 +303,22 @@ for (const field of ["host_ip: 127.0.0.1", 'published: "65199"', "target: 65199"
 }
 assert.equal(/^\s+expose:/m.test(composeSource), false, "source expose");
 assert.equal(/^\s+depends_on:/m.test(composeSource), false, "source depends_on");
-assert.equal(composeSource.includes("OTEL_EXPORTER_OTLP_ENDPOINT"), false, "ambiguous Collector endpoint");
+assert.equal(composeSource.includes("OTEL_EXPORTER_OTLP_"), false, "legacy Collector endpoint");
 assert.equal(composeSource.includes("FOURVISOR_OTLP_EXPORT_ENDPOINT"), false, "project-prefixed Collector endpoint");
 assert.equal(composeSource.includes("FOURVISOR_SERVER_ADDRESS"), false, "backend listener override");
 NODE
 
 collector_source="$(<"$project_root/otel-collector.yaml")"
 grep -Fq 'endpoint: 0.0.0.0:65103' <<<"$collector_source" || fail 'Collector OTLP/gRPC listener is missing'
-for signal in TRACES METRICS LOGS; do
-	grep -Fq "endpoint: \${env:OTEL_EXPORTER_OTLP_${signal}_ENDPOINT}" <<<"$collector_source" || \
-		fail "Collector native ${signal,,} exporter endpoint is missing"
-done
 for field in \
+	'endpoint: ${env:GRAFANA_CLOUD_OTLP_ENDPOINT}' \
+	'username: ${env:GRAFANA_CLOUD_INSTANCE_ID}' \
+	'password: ${env:GRAFANA_CLOUD_API_KEY}' \
+	'authenticator: basicauth/grafana_cloud' \
+	'extensions: [basicauth/grafana_cloud]' \
+	'check_interval: 1s' \
+	'limit_mib: 256' \
+	'spike_limit_mib: 64' \
 	'sampling_strategy: trace-complete' \
 	'decision_wait: 40m' \
 	'decision_wait_after_root_received: 10s' \
@@ -322,27 +326,16 @@ for field in \
 	'expected_new_traces_per_sec: 2' \
 	'status_codes: [ERROR]' \
 	'sampling_percentage: 10' \
-	'processors: [filter/metrics, transform/allowlisted_attributes]' \
-	'processors: [filter/logs, transform/allowlisted_attributes]'; do
+	'processors: [memory_limiter, tail_sampling, batch]' \
+	'processors: [memory_limiter, batch]' \
+	'exporters: [otlphttp/grafana_cloud]'; do
 	grep -Fq "$field" <<<"$collector_source" || fail "Collector policy field is missing: $field"
 done
-for metric in \
-	http.server.request.count http.server.request.duration \
-	http.client.request.count http.client.request.duration \
-	cache.operation.count cache.operation.duration \
-	lineage.synchronization.duration lineage.synchronization.activated \
-	lineage.failed_resource.count lineage.active.age; do
-	grep -Fq "\"$metric\"" <<<"$collector_source" || fail "Collector metric allowlist is missing $metric"
-done
-for message in \
-	'synchronization started' 'outbound acquisition completed' 'lineage activated' \
-	'previous lineage evicted' 'synchronization completed' 'oversized thread detected' \
-	'synchronization tick skipped'; do
-	grep -Fq "log.body != \"$message\"" <<<"$collector_source" || fail "Collector log allowlist is missing $message"
-done
-[[ "$(grep -Fc 'enabled: false' <<<"$collector_source")" -eq 6 ]] || fail 'Collector retries and queues are not all disabled'
-if grep -Eq '65104|OTEL_EXPORTER_OTLP_ENDPOINT|FOURVISOR_OTLP_EXPORT_ENDPOINT|^[[:space:]]+http:|file_storage|filelog|^[[:space:]]+file/' <<<"$collector_source"; then
-	fail 'Collector config contains the removed HTTP listener or project-prefixed endpoint'
+[[ "$(grep -Fc 'processors: [memory_limiter, batch]' <<<"$collector_source")" -eq 2 ]] || fail 'Collector metrics/logs processors are not identical'
+[[ "$(grep -Fc 'exporters: [otlphttp/grafana_cloud]' <<<"$collector_source")" -eq 3 ]] || fail 'Collector pipelines do not share one exporter'
+[[ "$(grep -Fc 'enabled: false' <<<"$collector_source")" -eq 2 ]] || fail 'Collector retry and queue are not disabled'
+if grep -Eq '65104|OTEL_EXPORTER_OTLP_|FOURVISOR_OTLP_EXPORT_ENDPOINT|filter/|transform/|otlp_grpc|file_storage|filelog|^[[:space:]]+file/' <<<"$collector_source"; then
+	fail 'Collector config contains removed application policy or legacy exporters'
 fi
 
 port_inventory="$(
@@ -438,9 +431,9 @@ docker container create \
 	--cidfile "$collector_cidfile" \
 	--name "$collector_name" \
 	--network none \
-	--env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=traces.invalid:65103 \
-	--env OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=metrics.invalid:65103 \
-	--env OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=logs.invalid:65103 \
+	--env GRAFANA_CLOUD_OTLP_ENDPOINT=https://grafana.invalid/otlp \
+	--env GRAFANA_CLOUD_INSTANCE_ID=test-instance \
+	--env GRAFANA_CLOUD_API_KEY=test-key \
 	--mount "type=bind,src=$project_root/otel-collector.yaml,dst=/etc/otelcol-contrib/config.yaml,readonly" \
 	"$collector_image" \
 	validate --config=/etc/otelcol-contrib/config.yaml >/dev/null
@@ -453,7 +446,7 @@ cat >"$capture_config" <<'EOF'
 receivers:
   otlp:
     protocols:
-      grpc:
+      http:
         endpoint: 0.0.0.0:65103
 
 exporters:
@@ -506,9 +499,9 @@ docker container create \
 	--name "$policy_name" \
 	--network "$policy_network" \
 	--publish 127.0.0.1:65196:65103 \
-	--env OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=capture:65103 \
-	--env OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=capture:65103 \
-	--env OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=capture:65103 \
+	--env GRAFANA_CLOUD_OTLP_ENDPOINT=http://capture:65103 \
+	--env GRAFANA_CLOUD_INSTANCE_ID=test-instance \
+	--env GRAFANA_CLOUD_API_KEY=test-key \
 	--mount "type=bind,src=$project_root/otel-collector.yaml,dst=/etc/otelcol-contrib/config.yaml,readonly" \
 	"$collector_image" \
 	--config=/etc/otelcol-contrib/config.yaml >/dev/null

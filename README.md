@@ -185,9 +185,10 @@ one in-flight gomemcache operation remains bounded by its 500 ms socket timeout.
 | `FOURVISOR_COMMIT_HASH` | required | Full lowercase 40-character deployed Git commit used in `User-Agent: 4Visor/<hash>`. |
 
 Empty, malformed, or out-of-range project-local settings stop startup with a
-diagnostic that names the setting but not its value. The backend emits JSON
-error logs and exports logs, metrics, and traces through OTLP. Collector or
-exporter unavailability can lose telemetry but never changes health processing.
+diagnostic that names the setting but not its value. The backend emits
+unfiltered JSON logs to stderr and exports its allowlisted logs, metrics, and
+traces through OTLP. Collector or exporter unavailability can lose telemetry
+but never changes health processing.
 
 ### Upstream acquisition
 
@@ -368,10 +369,9 @@ proxying `/api/*` to the backend, so `/api/snapshot` becomes `/snapshot` and
 
 Copy the environment template and fill its four required values. The commit
 must be the full lowercase hash of the checked-out deployment. Set
-`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` and
-`OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` to the respective OTLP/gRPC destination in
-`host:port` form; the three values may point to the same destination. Do not put
-credentials in the tracked example.
+`GRAFANA_CLOUD_OTLP_ENDPOINT` to the Grafana Cloud OTLP/HTTP base URL and set
+`GRAFANA_CLOUD_INSTANCE_ID` and `GRAFANA_CLOUD_API_KEY` to its Basic Auth
+credentials. Do not put credentials in the tracked example.
 
 ```sh
 cp .env.example .env
@@ -384,9 +384,8 @@ from the backend container environment and the Go defaults in the table above
 remain authoritative. The Compose deployment does not pass through
 `FOURVISOR_SERVER_ADDRESS`; its backend listener is fixed to `:65102` to match
 edge routing and the healthcheck. Memcached, Caddy and Collector use their native
-command, file and environment configuration; the Collector receives
-the three signal-specific native exporter variables above, never a
-project-prefixed replacement.
+command, file and environment configuration; the Collector receives only the
+three `GRAFANA_CLOUD_*` values above for its shared exporter.
 
 Validate configuration, pull only the three upstream images, build the two
 first-party images locally, then start the project without another build:
@@ -444,8 +443,11 @@ roots are `GET /health` and `GET /snapshot`; the scheduled root is
 Lineage ULIDs are diagnostic trace/log attributes, never metric labels; spans
 do not record raw URLs, cache keys, payloads or error messages.
 
-Only these metrics and datapoint attributes are exported; the sole metric
-resource attribute is `service.name=four-visor-backend`.
+The Go SDK catalogue owns the following metric names, kinds, units,
+descriptions and allowed datapoint attributes. Its catch-all View drops unknown
+names and known names created with the wrong SDK kind before export. Metric
+resources preserve `service.name=four-visor-backend` and the process-random
+`service.instance.id`; trace-based exemplars remain enabled.
 
 | Metric | Kind / unit | Allowed datapoint attributes |
 | --- | --- | --- |
@@ -470,7 +472,8 @@ thread, post and lineage identifiers, raw URLs and error messages are removed
 from metrics; `lineage.synchronization.activated` emits only `success` or
 `degraded`.
 
-All `ERROR` logs are retained. The only retained lower-severity records are
+The Go SDK filters only the `otelslog` branch. All `ERROR` and higher logs are
+retained there. The only retained lower-severity records are
 `synchronization started`, `outbound acquisition completed`,
 `lineage activated`, `previous lineage evicted`, `synchronization completed`,
 `oversized thread detected` and `synchronization tick skipped`. Their allowed
@@ -480,16 +483,19 @@ record attributes are `dependency`, `scheduler.reason`, `lineage.id`,
 `resource.catalog.count`, `resource.thread.count`, `resource.failed.count`,
 `resource.failed.tolerance`, `posts.limit`, `error.type` and
 `error.cause.type`. Routine successful request, outbound request, cache GET and
-cache-hit chatter is dropped. Caddy and third-party container stdout is not an
-OTLP input.
+cache-hit chatter is dropped from OTLP. The parallel JSON stderr handler is
+completely unfiltered. Caddy and third-party container stdout is not an OTLP
+input.
 
 To find an excessive-degradation trace, search retained logs for its
 `lineage.id`, take the native trace ID from the matching
 `excessively degraded lineage activated` error record, then query that trace in
-the configured trace destination. Exporters use the three signal-specific
-destinations above as plaintext OTLP/gRPC, with a five-second timeout, no
-retry, no sending queue and no persistent storage; an outage loses telemetry
-but does not change health, snapshot or synchronization results.
+the configured trace destination. Every Collector pipeline starts with a
+256 MiB memory limiter (64 MiB spike allowance, checked each second) and ends
+with batching. One authenticated `otlphttp/grafana_cloud` exporter sends all
+signals with a five-second timeout, no retry, no sending queue and no persistent
+storage; an outage loses telemetry but does not change health, snapshot or
+synchronization results.
 
 This is a single-node, personal-grade path. Collector restart loses pending
 tail decisions; the in-memory tail budget is 5,000 traces with a 40-minute
@@ -500,11 +506,12 @@ completeness, analytics, alerts or SLO guarantees.
 
 For trouble, first run `mise run compose:validate`; then confirm the backend
 uses `FOURVISOR_OTLP_ENDPOINT=http://otelcol:65103`, inspect backend and
-Collector logs with `docker compose logs backend otelcol`, and verify each
-configured signal destination is reachable from the Collector network. If
-application responses remain correct while telemetry is absent, diagnose the
-Collector or destination rather than changing application health or
-synchronization logic.
+Collector logs with `docker compose logs backend otelcol`, and verify the
+configured Grafana Cloud OTLP endpoint is reachable from the Collector network.
+Local validation uses an isolated capture Collector and does not contact
+Grafana Cloud. If application responses remain correct while telemetry is
+absent, diagnose the Collector or destination rather than changing application
+health or synchronization logic.
 
 ## Verification
 

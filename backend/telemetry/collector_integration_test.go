@@ -2,14 +2,15 @@ package telemetry
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
+	"maps"
 	"os"
 	"slices"
 	"strings"
@@ -21,6 +22,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/metric"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	tracesdk "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -34,7 +36,8 @@ const (
 
 func TestCollectorSignalPolicies(t *testing.T) {
 	fixture := collectorFixtureFromEnvironment(t)
-	providers, err := New(t.Context(), fixture.endpoint, io.Discard)
+	var stderr bytes.Buffer
+	providers, err := New(t.Context(), fixture.endpoint, &stderr)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -46,6 +49,7 @@ func TestCollectorSignalPolicies(t *testing.T) {
 
 	emitCollectorTestMetrics(t, providers)
 	emitCollectorTestLogs(t, providers)
+	assertUnfilteredStderr(t, stderr.Bytes())
 	emitCollectorTestTraces(t, fixture.endpoint)
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -178,49 +182,48 @@ func emitCollectorTestMetrics(t *testing.T, providers *Providers) {
 		return metric.WithAttributes(slices.Concat(allowed, forbidden)...)
 	}
 
-	serverCount, err := meter.Int64Counter("http.server.request.count")
+	serverCount, err := HTTPServerRequestCount.Int64Counter(meter)
 	if err != nil {
 		t.Fatalf("creating server request counter: %v", err)
 	}
-	serverDuration, err := meter.Float64Histogram("http.server.request.duration", metric.WithUnit("s"))
+	serverDuration, err := HTTPServerRequestDuration.Float64Histogram(meter)
 	if err != nil {
 		t.Fatalf("creating server duration histogram: %v", err)
 	}
-	clientCount, err := meter.Int64Counter("http.client.request.count")
+	clientCount, err := HTTPClientRequestCount.Int64Counter(meter)
 	if err != nil {
 		t.Fatalf("creating client request counter: %v", err)
 	}
-	clientDuration, err := meter.Float64Histogram("http.client.request.duration", metric.WithUnit("s"))
+	clientDuration, err := HTTPClientRequestDuration.Float64Histogram(meter)
 	if err != nil {
 		t.Fatalf("creating client duration histogram: %v", err)
 	}
-	cacheCount, err := meter.Int64Counter("cache.operation.count")
+	cacheCount, err := CacheOperationCount.Int64Counter(meter)
 	if err != nil {
 		t.Fatalf("creating cache operation counter: %v", err)
 	}
-	cacheDuration, err := meter.Float64Histogram("cache.operation.duration", metric.WithUnit("s"))
+	cacheDuration, err := CacheOperationDuration.Float64Histogram(meter)
 	if err != nil {
 		t.Fatalf("creating cache duration histogram: %v", err)
 	}
-	syncDuration, err := meter.Float64Histogram("lineage.synchronization.duration", metric.WithUnit("s"))
+	syncDuration, err := LineageSynchronizationDuration.Float64Histogram(meter)
 	if err != nil {
 		t.Fatalf("creating synchronization duration histogram: %v", err)
 	}
-	activated, err := meter.Int64Counter("lineage.synchronization.activated")
+	activated, err := LineageSynchronizationActivated.Int64Counter(meter)
 	if err != nil {
 		t.Fatalf("creating activation counter: %v", err)
 	}
-	failedResources, err := meter.Int64Histogram("lineage.failed_resource.count", metric.WithUnit("{resource}"))
+	failedResources, err := LineageFailedResourceCount.Int64Histogram(meter)
 	if err != nil {
 		t.Fatalf("creating failed-resource histogram: %v", err)
 	}
-	_, err = meter.Float64ObservableGauge("lineage.active.age",
-		metric.WithUnit("s"),
-		metric.WithFloat64Callback(func(_ context.Context, observer metric.Float64Observer) error {
+	_, err = LineageActiveAge.Float64ObservableGauge(meter,
+		func(_ context.Context, observer metric.Float64Observer) error {
 			observer.Observe(60, measurement())
 
 			return nil
-		}),
+		},
 	)
 	if err != nil {
 		t.Fatalf("creating active-age gauge: %v", err)
@@ -228,6 +231,10 @@ func emitCollectorTestMetrics(t *testing.T, providers *Providers) {
 	forbiddenMetric, err := meter.Int64Counter("fourvisor.forbidden.raw.metric")
 	if err != nil {
 		t.Fatalf("creating forbidden counter: %v", err)
+	}
+	wrongKindMetric, err := meter.Float64Histogram(metricCatalogue[HTTPServerRequestCount].name)
+	if err != nil {
+		t.Fatalf("creating wrong-kind metric: %v", err)
 	}
 
 	ctx := t.Context()
@@ -256,9 +263,49 @@ func emitCollectorTestMetrics(t *testing.T, providers *Providers) {
 	activated.Add(ctx, 1, lineage)
 	failedResources.Record(ctx, 0, measurement())
 	forbiddenMetric.Add(ctx, 1, measurement())
+	wrongKindMetric.Record(ctx, 1, measurement())
 
 	if err := providers.Meter.ForceFlush(ctx); err != nil {
 		t.Fatalf("flushing test metrics: %v", err)
+	}
+}
+
+func assertUnfilteredStderr(t *testing.T, output []byte) {
+	t.Helper()
+	expected := map[string]int{
+		"INFO synchronization started":        1,
+		"INFO outbound acquisition completed": 1,
+		"INFO lineage activated":              1,
+		"INFO previous lineage evicted":       1,
+		"INFO synchronization completed":      1,
+		"WARN oversized thread detected":      1,
+		"WARN synchronization tick skipped":   1,
+		"ERROR synthetic unlisted error":      1,
+		"ERROR successful cache GET":          1,
+		"INFO successful request completed":   1,
+		"INFO successful cache GET":           1,
+		"INFO successful outbound request":    1,
+		"INFO cache hit":                      1,
+		"WARN unrelated warning":              1,
+	}
+	seen := make(map[string]int, len(expected))
+	scanner := bufio.NewScanner(bytes.NewReader(output))
+	for scanner.Scan() {
+		var record map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+			t.Fatalf("decoding stderr record: %v", err)
+		}
+		key := fmt.Sprint(record["level"]) + " " + fmt.Sprint(record["msg"])
+		seen[key]++
+		if record["forbidden.raw"] != forbiddenSentinel {
+			t.Fatalf("stderr record %q lost unrestricted attributes: %#v", key, record)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("reading stderr records: %v", err)
+	}
+	if !maps.Equal(seen, expected) {
+		t.Fatalf("stderr records = %#v, want %#v", seen, expected)
 	}
 }
 
@@ -427,13 +474,14 @@ func readCapturedSpans(path string) ([]capturedSpan, error) {
 }
 
 type capturedMetric struct {
-	Name       string              `json:"name"`
-	Unit       string              `json:"unit"`
-	Gauge      *capturedMetricData `json:"gauge"`
-	Sum        *capturedMetricData `json:"sum"`
-	Histogram  *capturedMetricData `json:"histogram"`
-	Attributes map[string]string   `json:"-"`
-	Resource   map[string]string   `json:"-"`
+	Name        string              `json:"name"`
+	Description string              `json:"description"`
+	Unit        string              `json:"unit"`
+	Gauge       *capturedMetricData `json:"gauge"`
+	Sum         *capturedMetricData `json:"sum"`
+	Histogram   *capturedMetricData `json:"histogram"`
+	Attributes  map[string]string   `json:"-"`
+	Resource    map[string]string   `json:"-"`
 }
 
 type capturedMetricData struct {
@@ -596,26 +644,22 @@ func statusIsError(status json.RawMessage) bool {
 
 func assertCapturedMetrics(t *testing.T, metrics []capturedMetric) {
 	t.Helper()
-	type expectedMetric struct {
-		kind       string
-		unit       string
-		attributes map[string]string
-	}
-	expected := map[string]expectedMetric{
-		"http.server.request.count":         {kind: "sum", attributes: map[string]string{"http.request.method": "GET", "http.route": "/health", "http.response.status_code": "200"}},
-		"http.server.request.duration":      {kind: "histogram", unit: "s", attributes: map[string]string{"http.request.method": "GET", "http.route": "/health", "http.response.status_code": "200"}},
-		"http.client.request.count":         {kind: "sum", attributes: map[string]string{"resource.type": "boards", "error.type": "none", "http.response.status_code": "200"}},
-		"http.client.request.duration":      {kind: "histogram", unit: "s", attributes: map[string]string{"resource.type": "boards", "error.type": "none", "http.response.status_code": "200"}},
-		"cache.operation.count":             {kind: "sum", attributes: map[string]string{"cache.operation": "get", "cache.outcome": "hit"}},
-		"cache.operation.duration":          {kind: "histogram", unit: "s", attributes: map[string]string{"cache.operation": "get", "cache.outcome": "hit"}},
-		"lineage.synchronization.duration":  {kind: "histogram", unit: "s", attributes: map[string]string{"lineage.outcome": "success"}},
-		"lineage.synchronization.activated": {kind: "sum", attributes: map[string]string{"lineage.outcome": "success"}},
-		"lineage.failed_resource.count":     {kind: "histogram", unit: "{resource}", attributes: map[string]string{}},
-		"lineage.active.age":                {kind: "gauge", unit: "s", attributes: map[string]string{}},
+	expected := map[string]map[string]string{
+		"http.server.request.count":         {"http.request.method": "GET", "http.route": "/health", "http.response.status_code": "200"},
+		"http.server.request.duration":      {"http.request.method": "GET", "http.route": "/health", "http.response.status_code": "200"},
+		"http.client.request.count":         {"resource.type": "boards", "error.type": "none", "http.response.status_code": "200"},
+		"http.client.request.duration":      {"resource.type": "boards", "error.type": "none", "http.response.status_code": "200"},
+		"cache.operation.count":             {"cache.operation": "get", "cache.outcome": "hit"},
+		"cache.operation.duration":          {"cache.operation": "get", "cache.outcome": "hit"},
+		"lineage.synchronization.duration":  {"lineage.outcome": "success"},
+		"lineage.synchronization.activated": {"lineage.outcome": "success"},
+		"lineage.failed_resource.count":     {},
+		"lineage.active.age":                {},
 	}
 	seen := make(map[string]bool, len(expected))
+	var instanceID string
 	for _, item := range metrics {
-		want, ok := expected[item.Name]
+		wantAttributes, ok := expected[item.Name]
 		if !ok {
 			t.Fatalf("unexpected exported metric %q", item.Name)
 		}
@@ -623,18 +667,52 @@ func assertCapturedMetrics(t *testing.T, metrics []capturedMetric) {
 			t.Fatalf("metric %q exported more than once", item.Name)
 		}
 		seen[item.Name] = true
-		if item.kind() != want.kind || item.Unit != want.unit {
-			t.Fatalf("metric %q kind/unit = %q/%q, want %q/%q", item.Name, item.kind(), item.Unit, want.kind, want.unit)
+		definition, ok := catalogueDefinition(item.Name)
+		if !ok {
+			t.Fatalf("metric %q missing from catalogue", item.Name)
 		}
-		if !mapsEqual(item.Attributes, want.attributes) {
-			t.Fatalf("metric %q attributes = %#v, want %#v", item.Name, item.Attributes, want.attributes)
+		if item.kind() != exportedKind(definition.kind) || item.Unit != definition.unit || item.Description != definition.description {
+			t.Fatalf("metric %q kind/unit/description = %q/%q/%q, want %q/%q/%q",
+				item.Name, item.kind(), item.Unit, item.Description,
+				exportedKind(definition.kind), definition.unit, definition.description)
 		}
-		if !mapsEqual(item.Resource, map[string]string{"service.name": serviceName}) {
+		if !mapsEqual(item.Attributes, wantAttributes) {
+			t.Fatalf("metric %q attributes = %#v, want %#v", item.Name, item.Attributes, wantAttributes)
+		}
+		if item.Resource["service.name"] != serviceName || len(item.Resource) != 2 {
 			t.Fatalf("metric %q resource = %#v", item.Name, item.Resource)
 		}
+		currentInstanceID := item.Resource["service.instance.id"]
+		if len(currentInstanceID) != 32 || (instanceID != "" && currentInstanceID != instanceID) {
+			t.Fatalf("metric %q service.instance.id = %q", item.Name, currentInstanceID)
+		}
+		instanceID = currentInstanceID
 	}
 	if len(seen) != len(expected) {
 		t.Fatalf("exported metrics = %#v, want all %d allowlisted instruments", seen, len(expected))
+	}
+}
+
+func catalogueDefinition(name string) (metricDefinition, bool) {
+	for _, definition := range metricCatalogue {
+		if definition.name == name {
+			return definition, true
+		}
+	}
+
+	return metricDefinition{}, false
+}
+
+func exportedKind(kind metricsdk.InstrumentKind) string {
+	switch kind {
+	case metricsdk.InstrumentKindCounter:
+		return "sum"
+	case metricsdk.InstrumentKindHistogram:
+		return "histogram"
+	case metricsdk.InstrumentKindObservableGauge:
+		return "gauge"
+	default:
+		return ""
 	}
 }
 

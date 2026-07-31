@@ -14,6 +14,7 @@ import (
 	"git.disroot.org/federico-paolillo/four-visor.git/acquisition"
 	"git.disroot.org/federico-paolillo/four-visor.git/lineage"
 	"git.disroot.org/federico-paolillo/four-visor.git/snapshot"
+	"git.disroot.org/federico-paolillo/four-visor.git/telemetry"
 	"github.com/oklog/ulid/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -139,33 +140,23 @@ func startupJitter(entropy io.Reader) (time.Duration, error) {
 func (scheduler *Scheduler) createMetrics(meter metric.Meter) error {
 	var err error
 
-	scheduler.duration, err = meter.Float64Histogram("lineage.synchronization.duration",
-		metric.WithDescription("Duration of scheduled lineage synchronization attempts."),
-		metric.WithUnit("s"),
-	)
+	scheduler.duration, err = telemetry.LineageSynchronizationDuration.Float64Histogram(meter)
 	if err != nil {
 		return fmt.Errorf("creating lineage synchronization duration: %w", err)
 	}
 
-	scheduler.activations, err = meter.Int64Counter("lineage.synchronization.activated",
-		metric.WithDescription("Number of activated successful or degraded lineages."),
-	)
+	scheduler.activations, err = telemetry.LineageSynchronizationActivated.Int64Counter(meter)
 	if err != nil {
 		return fmt.Errorf("creating lineage activation counter: %w", err)
 	}
 
-	scheduler.failedResources, err = meter.Int64Histogram("lineage.failed_resource.count",
-		metric.WithDescription("Number of failed resources in an activated lineage."),
-		metric.WithUnit("{resource}"),
-	)
+	scheduler.failedResources, err = telemetry.LineageFailedResourceCount.Int64Histogram(meter)
 	if err != nil {
 		return fmt.Errorf("creating failed resource count: %w", err)
 	}
 
-	_, err = meter.Float64ObservableGauge("lineage.active.age",
-		metric.WithDescription("Age of the lineage activated by this process."),
-		metric.WithUnit("s"),
-		metric.WithFloat64Callback(func(_ context.Context, observer metric.Float64Observer) error {
+	_, err = telemetry.LineageActiveAge.Float64ObservableGauge(meter,
+		func(_ context.Context, observer metric.Float64Observer) error {
 			observedAt := scheduler.activeObservedAt.Load()
 			if observedAt == 0 {
 				return nil
@@ -175,7 +166,7 @@ func (scheduler *Scheduler) createMetrics(meter metric.Meter) error {
 			observer.Observe(max(age, 0))
 
 			return nil
-		}),
+		},
 	)
 	if err != nil {
 		return fmt.Errorf("creating active lineage age: %w", err)

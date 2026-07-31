@@ -20,9 +20,9 @@ run = '''
 set -eu
 compose() {
   FOURVISOR_COMMIT_HASH=0000000000000000000000000000000000000000 \
-    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=collector.invalid:65103 \
-    OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=collector.invalid:65103 \
-    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=collector.invalid:65103 \
+    GRAFANA_CLOUD_OTLP_ENDPOINT=http://collector.invalid:65103 \
+    GRAFANA_CLOUD_INSTANCE_ID=test-instance \
+    GRAFANA_CLOUD_API_KEY=test-key \
     docker compose -p four-visor-test -f ../docker-compose.yml -f ../docker-compose.test.yml "$@"
 }
 cleanup() {

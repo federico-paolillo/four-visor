@@ -22,17 +22,12 @@ func HTTPHandler(
 ) (http.Handler, error) {
 	meter := meterProvider.Meter(serviceName)
 
-	requests, err := meter.Int64Counter("http.server.request.count",
-		metric.WithDescription("Number of inbound HTTP requests."),
-	)
+	requests, err := HTTPServerRequestCount.Int64Counter(meter)
 	if err != nil {
 		return nil, fmtInstrumentError("request counter", err)
 	}
 
-	duration, err := meter.Float64Histogram("http.server.request.duration",
-		metric.WithDescription("Inbound HTTP request duration."),
-		metric.WithUnit("s"),
-	)
+	duration, err := HTTPServerRequestDuration.Float64Histogram(meter)
 	if err != nil {
 		return nil, fmtInstrumentError("request duration", err)
 	}

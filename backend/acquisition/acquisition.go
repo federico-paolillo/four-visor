@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"git.disroot.org/federico-paolillo/four-visor.git/snapshot"
+	"git.disroot.org/federico-paolillo/four-visor.git/telemetry"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -107,17 +108,12 @@ func newClient(
 		return nil, fmt.Errorf("%w: invalid upstream base URL", errInvalidPolicy)
 	}
 
-	requests, err := meter.Int64Counter("http.client.request.count",
-		metric.WithDescription("Number of outbound acquisition request attempts."),
-	)
+	requests, err := telemetry.HTTPClientRequestCount.Int64Counter(meter)
 	if err != nil {
 		return nil, fmt.Errorf("creating HTTP client request counter: %w", err)
 	}
 
-	duration, err := meter.Float64Histogram("http.client.request.duration",
-		metric.WithDescription("Outbound acquisition request attempt duration."),
-		metric.WithUnit("s"),
-	)
+	duration, err := telemetry.HTTPClientRequestDuration.Float64Histogram(meter)
 	if err != nil {
 		return nil, fmt.Errorf("creating HTTP client duration histogram: %w", err)
 	}
