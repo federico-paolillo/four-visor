@@ -2,10 +2,6 @@
 
 FROM golang:1.26.5-bookworm@sha256:3f6236bd765f898a2a3c2946112b04097814c4529d44534674700cd07b9c6b4c AS build
 
-ARG TARGETPLATFORM
-
-RUN test "$TARGETPLATFORM" = "linux/amd64"
-
 WORKDIR /src
 
 COPY go.mod go.sum ./

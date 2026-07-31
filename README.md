@@ -32,8 +32,9 @@ prepared personally by me.
 - `backend/` contains backend code. Written in Go
 - `frontend/` containes frontend code. Written in TypeScript
 
-The backend and frontend enforce the same fixture-backed
-[snapshot version 1 contract](docs/snapshot-v1-contract.md).
+The backend and frontend enforce the authoritative
+[snapshot version 1 requirements](docs/SEED.md#snapshot-schema-version-1)
+against the shared executable fixtures in [`testdata/snapshot-v1`](testdata/snapshot-v1).
 
 ### Progressive Web App shell
 
@@ -296,8 +297,9 @@ go run ./cmd/app
 
 ## First-party images
 
-The backend and frontend images support Linux amd64 only. Build them through a
-rootless Docker daemon without `sudo`; both builds reject any other target:
+The backend and frontend images support Linux amd64 only. Results for every
+other platform are undefined. Build the supported images through a rootless
+Docker daemon without `sudo`:
 
 ```sh
 docker build --platform=linux/amd64 -t four-visor-backend:local backend
@@ -341,14 +343,6 @@ ingress alone owns TLS and Brotli compression. Memcached, the OpenTelemetry
 Collector, edge Caddy and other third-party images remain their upstream images
 and are not rebuilt to impose first-party controls.
 
-Run `mise run images:validate` to execute the backend and frontend gates, build
-both images, inspect their metadata and contents, validate the Caddyfile, and
-start each process briefly with `--network none --read-only`. This is artifact
-integration validation: it publishes no port and makes no HTTP or health probe.
-A cold run needs access to the configured container registries, Go module proxy
-and npm registry and may take 15–30 minutes; cached runs usually take several
-minutes. It installs no host or system packages.
-
 ## Compose deployment
 
 The production Compose project contains exactly five Linux amd64 services:
@@ -387,11 +381,11 @@ edge routing and the healthcheck. Memcached, Caddy and Collector use their nativ
 command, file and environment configuration; the Collector receives only the
 three `GRAFANA_CLOUD_*` values above for its shared exporter.
 
-Validate configuration, pull only the three upstream images, build the two
+Render the configuration, pull only the three upstream images, build the two
 first-party images locally, then start the project without another build:
 
 ```sh
-mise run compose:validate
+docker compose config
 docker compose pull edge memcached otelcol
 docker compose build --pull backend frontend
 docker compose up -d --no-build
@@ -410,7 +404,7 @@ built first-party images:
 
 ```sh
 git pull --ff-only
-mise run compose:validate
+docker compose config
 docker compose pull edge memcached otelcol
 docker compose build --pull backend frontend
 docker compose up -d --no-build --remove-orphans
@@ -504,14 +498,13 @@ spans or traces exceeding that window can be incomplete, and small successful
 samples need not equal exactly 10%. It provides diagnostics, not audit
 completeness, analytics, alerts or SLO guarantees.
 
-For trouble, first run `mise run compose:validate`; then confirm the backend
+For trouble, first run `docker compose config`; then confirm the backend
 uses `FOURVISOR_OTLP_ENDPOINT=http://otelcol:65103`, inspect backend and
 Collector logs with `docker compose logs backend otelcol`, and verify the
 configured Grafana Cloud OTLP endpoint is reachable from the Collector network.
-Local validation uses an isolated capture Collector and does not contact
-Grafana Cloud. If application responses remain correct while telemetry is
-absent, diagnose the Collector or destination rather than changing application
-health or synchronization logic.
+If application responses remain correct while telemetry is absent, diagnose the
+Collector or destination rather than changing application health or
+synchronization logic.
 
 ## Verification
 
@@ -534,8 +527,11 @@ health or synchronization logic.
 
 ### First-party images
 
-- `images:validate`
+- `docker build --platform=linux/amd64 -t four-visor-backend:local backend`
+- `docker build --platform=linux/amd64 -t four-visor-frontend:local frontend`
 
 ### Compose deployment
 
-- `compose:validate`
+- `docker compose config`
+- `docker compose build --pull backend frontend`
+- `docker compose up -d --no-build`

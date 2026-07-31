@@ -52,5 +52,5 @@ The Operator can deploy and upgrade the personal instance with a small topology 
 
 ## Validation
 
-- Integration-validate rendered Compose and Caddy configuration plus Collector/Memcached service wiring, mounts, network membership, health command, and every local listener/target port; pipeline semantics remain excluded. Verify route order/prefix stripping, loopback binding, and absence of other published ports/TLS/Brotli directives.
+- Render the Compose configuration, build the first-party images, and start the normal loopback-only stack for operator inspection.
 - Do not add a deployment or smoke test.

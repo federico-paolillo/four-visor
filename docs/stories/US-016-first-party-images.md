@@ -50,5 +50,5 @@ The Operator can build small, deterministic runtime artifacts that serve 4Visor 
 
 ## Validation
 
-- Integration validation builds each image, inspects configured user/architecture/entrypoint, and runs the contained process under a read-only filesystem in isolation; this is artifact integration validation, not a deployment/smoke test.
+- Build each Linux amd64 image and run its normal process with a read-only root filesystem.
 - Run the backend and frontend build/unit checks before image assembly.

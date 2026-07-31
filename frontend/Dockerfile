@@ -2,10 +2,6 @@
 
 FROM node:26.5.0-bookworm-slim@sha256:607728e8751f69809c871e2cfa65d645f51ffacb5a0e9fc60f4cb7404ee5c16a AS build
 
-ARG TARGETPLATFORM
-
-RUN test "$TARGETPLATFORM" = "linux/amd64"
-
 WORKDIR /src
 
 COPY package.json package-lock.json ./

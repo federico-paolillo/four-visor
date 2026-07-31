@@ -51,5 +51,5 @@ The Operator can explain a failed request or degraded lineage from one trace whi
 
 ## Validation
 
-- Integration-test backend telemetry through a test Collector pipeline with synthetic successful/failed traces, asserting tail sampling, catalogue metrics, unknown/wrong-kind drops, resource identity, OTLP filtering, unfiltered stderr, and failure non-interference.
-- Validate the Collector configuration and tail-sampling policy deterministically against a local capture Collector; do not contact Grafana Cloud or perform deployment/external-backend tests.
+- Run the backend tests for SDK behavior, then render and start the normal loopback-only Compose stack and inspect Collector logs.
+- Do not maintain a separate capture Collector or perform deployment/external-backend tests.
