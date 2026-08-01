@@ -13,6 +13,18 @@ import (
 
 const fixtureRoot = "../../testdata/snapshot-v1"
 
+func TestRealWorldSnapshotDeserializes(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join(fixtureRoot, "real-world.json"))
+	if err != nil {
+		t.Fatalf("os.ReadFile() error = %v", err)
+	}
+
+	_, err = Parse(data)
+	if err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+}
+
 func TestSharedFixtureCorpus(t *testing.T) {
 	tests := []struct {
 		directory string

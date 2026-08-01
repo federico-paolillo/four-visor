@@ -136,7 +136,7 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	acquisition, err := loadAcquisition()
+	acquisition, err := LoadAcquisition()
 	if err != nil {
 		return Config{}, err
 	}
@@ -180,7 +180,8 @@ func loadSynchronization() (Synchronization, error) {
 	return Synchronization{Interval: interval, FailedResourceTolerance: tolerance}, nil
 }
 
-func loadAcquisition() (Acquisition, error) {
+// LoadAcquisition reads only the settings needed to observe 4chan resources.
+func LoadAcquisition() (Acquisition, error) {
 	rateInterval, err := duration(rateIntervalKey, defaultRateInterval)
 	if err != nil {
 		return Acquisition{}, err

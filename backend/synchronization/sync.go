@@ -83,7 +83,7 @@ func New(
 		meter:          meter,
 		jitterEntropy:  cryptorand.Reader,
 		lineageEntropy: ulid.DefaultEntropy(),
-		deadline:       lineageDeadline,
+		deadline:       LineageDeadline,
 	})
 }
 

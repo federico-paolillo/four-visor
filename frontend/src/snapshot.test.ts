@@ -47,6 +47,10 @@ describe("shared snapshot version 1 fixtures", () => {
   }
 });
 
+it("deserializes the real-world snapshot", () => {
+  expect(() => parseSnapshot(fixture("/real-world.json"))).not.toThrow();
+});
+
 it("accepts backend serialization without changing opaque fields or order", () => {
   const text = fixture("/valid/backend-serialized.json");
   const raw: unknown = JSON.parse(text);

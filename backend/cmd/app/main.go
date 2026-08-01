@@ -27,6 +27,8 @@ func execute(ctx context.Context, args []string, stderr io.Writer, client *http.
 		return run(ctx, stderr)
 	case len(args) == 2 && args[0] == "healthcheck":
 		return checkBackendHealth(ctx, client, args[1])
+	case len(args) > 0 && args[0] == "snapshot":
+		return exportSnapshot(ctx, args[1:], stderr, client)
 	default:
 		return errInvalidCommand
 	}
