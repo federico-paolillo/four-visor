@@ -25,7 +25,7 @@ const clientRefresh = new AbortController();
 export const applicationController = startApplication({
   confirm: (message) => window.confirm(message),
   load: async () => {
-    const snapshot = await loadActiveSnapshot(indexedDB, IDBKeyRange, crypto);
+    const snapshot = await loadActiveSnapshot(indexedDB, crypto);
     clientRefreshJitter = await loadOrCreateClientRefreshJitter(
       indexedDB,
       crypto,

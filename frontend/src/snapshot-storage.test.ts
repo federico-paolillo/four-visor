@@ -152,7 +152,7 @@ describe("startup lineage loading", () => {
     await seedLineage(factory, "active", minimalSnapshot(), activeKey);
     const close = vi.spyOn(FakeIDBDatabase.prototype, "close");
 
-    const snapshot = await loadActiveSnapshot(factory, IDBKeyRange, crypto);
+    const snapshot = await loadActiveSnapshot(factory, crypto);
 
     expect(snapshot?.lineageId).toBe("01J1YQ7Y0M4S6R8T2V3W5X7Y9Z");
     expect(close).toHaveBeenCalled();
@@ -160,15 +160,11 @@ describe("startup lineage loading", () => {
   });
 
   it("returns empty for a fresh database and for structural incoming only", async () => {
-    expect(
-      await loadActiveSnapshot(new IDBFactory(), IDBKeyRange, crypto),
-    ).toBeUndefined();
+    expect(await loadActiveSnapshot(new IDBFactory(), crypto)).toBeUndefined();
 
     const factory = new IDBFactory();
     await seedLineage(factory, "incoming", "not valid JSON", incomingKey);
-    expect(
-      await loadActiveSnapshot(factory, IDBKeyRange, crypto),
-    ).toBeUndefined();
+    expect(await loadActiveSnapshot(factory, crypto)).toBeUndefined();
   });
 
   it("does not trust or render an invalid but structurally complete incoming candidate", async () => {
@@ -176,7 +172,7 @@ describe("startup lineage loading", () => {
     await seedLineage(factory, "active", minimalSnapshot(), activeKey);
     await seedLineage(factory, "incoming", "not valid JSON", incomingKey);
 
-    const snapshot = await loadActiveSnapshot(factory, IDBKeyRange, crypto);
+    const snapshot = await loadActiveSnapshot(factory, crypto);
 
     expect(snapshot?.lineageId).toBe("01J1YQ7Y0M4S6R8T2V3W5X7Y9Z");
   });
@@ -195,9 +191,9 @@ describe("startup lineage loading", () => {
     expect(active.descriptor.storageKey).not.toBe(
       incoming.descriptor.storageKey,
     );
-    expect(
-      (await loadActiveSnapshot(factory, IDBKeyRange, crypto))?.lineageId,
-    ).toBe("01J1YQ7Y0M4S6R8T2V3W5X7Y9Z");
+    expect((await loadActiveSnapshot(factory, crypto))?.lineageId).toBe(
+      "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
+    );
   });
 
   it("round-trips a private maximum-cardinality fixture across many records", async () => {
@@ -210,7 +206,7 @@ describe("startup lineage loading", () => {
     );
 
     expect(encoded.descriptor.recordCount).toBeGreaterThan(1);
-    const snapshot = await loadActiveSnapshot(factory, IDBKeyRange, crypto);
+    const snapshot = await loadActiveSnapshot(factory, crypto);
     if (snapshot?.boards.state !== "present") {
       throw new Error("maximum fixture boards must be present");
     }
@@ -255,9 +251,9 @@ describe("complete lineage replacement", () => {
     expect(new Set(state.records.map(({ storageKey }) => storageKey))).toEqual(
       new Set([incomingKey]),
     );
-    expect(
-      (await loadActiveSnapshot(factory, IDBKeyRange, crypto))?.observedAt,
-    ).toBe("2026-07-25T12:00:00Z");
+    expect((await loadActiveSnapshot(factory, crypto))?.observedAt).toBe(
+      "2026-07-25T12:00:00Z",
+    );
   });
 
   it("activates the first complete snapshot without creating a second owner", async () => {
@@ -395,9 +391,9 @@ describe("complete lineage replacement", () => {
       expect(recordsFor(after, activeKey)).toEqual(
         recordsFor(before, activeKey),
       );
-      expect(
-        (await loadActiveSnapshot(factory, IDBKeyRange, crypto))?.lineageId,
-      ).toBe("01J1YQ7Y0M4S6R8T2V3W5X7Y9Z");
+      expect((await loadActiveSnapshot(factory, crypto))?.lineageId).toBe(
+        "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z",
+      );
     },
   );
 
@@ -491,7 +487,7 @@ describe("complete lineage replacement", () => {
       } as SubtleCrypto,
     };
 
-    const oldRead = loadActiveSnapshot(factory, IDBKeyRange, delayedCrypto);
+    const oldRead = loadActiveSnapshot(factory, delayedCrypto);
     await digestStarted.promise;
     await replaceActiveSnapshot(
       olderSameIdSnapshot(),
@@ -503,9 +499,9 @@ describe("complete lineage replacement", () => {
     continueDigest.resolve();
 
     expect((await oldRead)?.observedAt).toBe("2026-07-26T12:00:00Z");
-    expect(
-      (await loadActiveSnapshot(factory, IDBKeyRange, crypto))?.observedAt,
-    ).toBe("2026-07-25T12:00:00Z");
+    expect((await loadActiveSnapshot(factory, crypto))?.observedAt).toBe(
+      "2026-07-25T12:00:00Z",
+    );
   });
 });
 
@@ -792,9 +788,9 @@ describe("replacement cancellation and connection ownership", () => {
 
 describe("startup ownership and corruption audit", () => {
   it("rejects missing IndexedDB and preserves unavailable causes", async () => {
-    await expect(
-      loadActiveSnapshot(undefined, IDBKeyRange, crypto),
-    ).rejects.toMatchObject({ kind: "unavailable" });
+    await expect(loadActiveSnapshot(undefined, crypto)).rejects.toMatchObject({
+      kind: "unavailable",
+    });
 
     const cause = new DOMException("private detail", "SecurityError");
     const factory = {
@@ -802,9 +798,10 @@ describe("startup ownership and corruption audit", () => {
         throw cause;
       },
     } as unknown as IDBFactory;
-    await expect(
-      loadActiveSnapshot(factory, IDBKeyRange, crypto),
-    ).rejects.toMatchObject({ kind: "unavailable", cause });
+    await expect(loadActiveSnapshot(factory, crypto)).rejects.toMatchObject({
+      kind: "unavailable",
+      cause,
+    });
   });
 
   it("classifies a newer database as corrupt without migration", async () => {
@@ -1033,9 +1030,9 @@ function deferred<T>() {
 }
 
 async function expectCorrupt(factory: IDBFactory): Promise<void> {
-  await expect(
-    loadActiveSnapshot(factory, IDBKeyRange, crypto),
-  ).rejects.toMatchObject({ kind: "corrupt" });
+  await expect(loadActiveSnapshot(factory, crypto)).rejects.toMatchObject({
+    kind: "corrupt",
+  });
 }
 
 async function seedLineage(

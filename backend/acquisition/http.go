@@ -163,6 +163,7 @@ func (client *Client) attempt(
 	attemptCtx, cancel := context.WithTimeoutCause(ctx, client.policy.RequestTimeout, errRequestTimeout)
 	defer cancel()
 
+	// Each lineage is built from scratch, so no prior representation exists for conditional requests.
 	request, err := http.NewRequestWithContext(attemptCtx, http.MethodGet, target, http.NoBody)
 	if err != nil {
 		return &requestError{kind: errorInvalid, cause: err}

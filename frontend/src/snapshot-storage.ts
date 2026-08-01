@@ -155,7 +155,6 @@ export async function openSnapshotDatabase(
 // loadActiveSnapshot audits all lineage ownership and validates only the active payload.
 export async function loadActiveSnapshot(
   factory: IDBFactory | undefined = globalThis.indexedDB,
-  _keyRange: typeof IDBKeyRange = globalThis.IDBKeyRange,
   cryptoApi: Pick<Crypto, "subtle"> = globalThis.crypto,
 ): Promise<SnapshotV1 | undefined> {
   let database: IDBDatabase | undefined;
@@ -758,7 +757,7 @@ function reassemble(
 function transactionCompletion(
   transaction: IDBTransaction,
   signal?: AbortSignal,
-  commitWins = false,
+  committedTransactionWinsCancellation = false,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let cause: unknown;
@@ -781,7 +780,10 @@ function transactionCompletion(
     };
     const onComplete = () => {
       cleanup();
-      if (signal?.aborted && !(commitWins && commitAlreadyWon)) {
+      if (
+        signal?.aborted &&
+        !(committedTransactionWinsCancellation && commitAlreadyWon)
+      ) {
         rejectCancellation();
         return;
       }
@@ -803,6 +805,7 @@ function transactionCompletion(
         return;
       }
       try {
+        // Cancellation prevents activation only while this transaction can still be aborted.
         transaction.abort();
       } catch (abortFailure) {
         if (errorNamed(abortFailure, "InvalidStateError")) {

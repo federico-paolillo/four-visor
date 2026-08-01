@@ -388,6 +388,7 @@ func (publisher *Publisher) activate(
 		return err
 	}
 
+	// Publication relies on one active-pointer writer, so no compare-and-swap coordination is needed.
 	setError := publisher.cache.set(ctx, item)
 	if setError == nil {
 		span.SetAttributes(attribute.String("lineage.outcome", "success"))

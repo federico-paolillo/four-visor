@@ -283,7 +283,7 @@ describe("fixed client refresh cadence", () => {
     expect(activeSync).toHaveBeenCalledOnce();
   });
 
-  it("runs the US-010 boundary without real network and waits after failure", async () => {
+  it("renders synchronization failure, waits one interval, then retries successfully", async () => {
     vi.useFakeTimers();
     const renders: ApplicationState[] = [];
     const fetchSnapshot = vi

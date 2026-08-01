@@ -66,6 +66,7 @@ export async function resetLocalData(
   reportProgress("unregistering-service-worker");
   await unregisterRootServiceWorker(serviceWorkers, rootScope);
   await assertNoRootServiceWorker(serviceWorkers, rootScope);
+  // Unregistration can race a worker recreating its cache, so clean owned caches again.
   await deleteOwnedCaches(cacheStorage);
   await assertNoRootServiceWorker(serviceWorkers, rootScope);
 

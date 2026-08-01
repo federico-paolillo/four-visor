@@ -88,6 +88,7 @@ func (scheduler *Scheduler) consumeTick(
 		}
 	}
 
+	// A tick delivered before completion stays stale even when this select observes completion first.
 	if active || (!completedAt.IsZero() && !tick.After(completedAt)) {
 		scheduler.logger.WarnContext(ctx, "synchronization tick skipped",
 			slog.String("scheduler.reason", "synchronization_active"),
