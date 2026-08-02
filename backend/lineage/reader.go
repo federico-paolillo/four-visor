@@ -17,32 +17,56 @@ var (
 	errLineageMismatch = errors.New("active pointer and snapshot lineage differ")
 )
 
+type snapshotError struct {
+	component string
+	lineageID string
+	cause     error
+}
+
+func (failure *snapshotError) Error() string {
+	return "snapshot " + failure.component + " failed"
+}
+
+func (failure *snapshotError) Unwrap() error {
+	return failure.cause
+}
+
+type snapshotRead struct {
+	data      []byte
+	lineageID string
+}
+
 type snapshotReader struct {
 	cache  *instrumentedCache
 	tracer trace.Tracer
 }
 
-// read resolves and validates the lineage pinned by the active pointer without exposing its cache layout.
-func (reader *snapshotReader) read(ctx context.Context) ([]byte, error) {
+// readSnapshot resolves and validates the lineage pinned by the active pointer without exposing its cache layout.
+func (reader *snapshotReader) readSnapshot(ctx context.Context) (snapshotRead, error) {
 	lineageID, err := reader.readPointer(ctx)
 	if err != nil {
-		return nil, err
+		return snapshotRead{}, err
 	}
 
 	metadata, err := reader.readCompletion(ctx, lineageID)
 	if err != nil {
-		return nil, err
+		return snapshotRead{}, err
 	}
 
 	data := make([]byte, 0, min(metadata.ByteLength, blockSize))
 	for index := range metadata.BlockCount {
 		data, err = reader.readBlock(ctx, lineageID, metadata, index, data)
 		if err != nil {
-			return nil, err
+			return snapshotRead{}, err
 		}
 	}
 
-	return reader.validate(ctx, lineageID, data)
+	data, err = reader.validate(ctx, lineageID, data)
+	if err != nil {
+		return snapshotRead{}, err
+	}
+
+	return snapshotRead{data: data, lineageID: lineageID}, nil
 }
 
 func (reader *snapshotReader) readPointer(ctx context.Context) (string, error) {
@@ -51,15 +75,17 @@ func (reader *snapshotReader) readPointer(ctx context.Context) (string, error) {
 
 	item, err := reader.get(ctx, activePointerKey)
 	if err != nil {
-		finishSnapshotSpan(span, "pointer", err)
+		failure := wrapSnapshotFailure("pointer", "", err)
+		finishSnapshotSpan(span, failure)
 
-		return "", fmt.Errorf("reading active lineage pointer: %w", err)
+		return "", wrapSnapshotFailure("pointer", "", fmt.Errorf("reading active lineage pointer: %w", err))
 	}
 
 	lineageID := string(item.Value)
 	if !snapshot.ValidLineageID(lineageID) {
 		err = errors.Join(errCorruptSnapshot, errors.New("invalid active lineage identifier"))
-		finishSnapshotSpan(span, "pointer", err)
+		err = wrapSnapshotFailure("pointer", "", err)
+		finishSnapshotSpan(span, err)
 
 		return "", err
 	}
@@ -80,15 +106,20 @@ func (reader *snapshotReader) readCompletion(ctx context.Context, lineageID stri
 
 	item, err := reader.get(ctx, completionKey(lineageID))
 	if err != nil {
-		finishSnapshotSpan(span, "completion", err)
+		failure := wrapSnapshotFailure("completion", lineageID, err)
+		finishSnapshotSpan(span, failure)
 
-		return completion{}, fmt.Errorf("reading lineage completion: %w", err)
+		return completion{}, wrapSnapshotFailure(
+			"completion",
+			lineageID,
+			fmt.Errorf("reading lineage completion: %w", err),
+		)
 	}
 
 	metadata, err := decodeCompletion(item.Value)
 	if err != nil {
-		failure := errors.Join(errCorruptSnapshot, err)
-		finishSnapshotSpan(span, "completion", failure)
+		failure := wrapSnapshotFailure("completion", lineageID, errors.Join(errCorruptSnapshot, err))
+		finishSnapshotSpan(span, failure)
 
 		return completion{}, failure
 	}
@@ -112,15 +143,20 @@ func (reader *snapshotReader) readBlock(
 
 	item, err := reader.get(ctx, blockKey(lineageID, index))
 	if err != nil {
-		finishSnapshotSpan(span, "block", err)
+		failure := wrapSnapshotFailure("block", lineageID, err)
+		finishSnapshotSpan(span, failure)
 
-		return nil, fmt.Errorf("reading lineage block: %w", err)
+		return nil, wrapSnapshotFailure(
+			"block",
+			lineageID,
+			fmt.Errorf("reading lineage block: %w", err),
+		)
 	}
 
 	data, err = appendBlock(data, metadata, index, item.Value)
 	if err != nil {
-		failure := errors.Join(errCorruptSnapshot, err)
-		finishSnapshotSpan(span, "block", failure)
+		failure := wrapSnapshotFailure("block", lineageID, errors.Join(errCorruptSnapshot, err))
+		finishSnapshotSpan(span, failure)
 
 		return nil, failure
 	}
@@ -138,31 +174,37 @@ func (reader *snapshotReader) validate(ctx context.Context, lineageID string, da
 
 	err := snapshotContextError(ctx)
 	if err != nil {
-		finishSnapshotSpan(span, "serialization", err)
+		failure := wrapSnapshotFailure("serialization", lineageID, err)
+		finishSnapshotSpan(span, failure)
 
-		return nil, err
+		return nil, failure
 	}
 
 	parsed, err := snapshot.Parse(data)
 	if err != nil {
-		failure := errors.Join(errCorruptSnapshot, err)
-		finishSnapshotSpan(span, "serialization", failure)
+		failure := wrapSnapshotFailure("serialization", lineageID, errors.Join(errCorruptSnapshot, err))
+		finishSnapshotSpan(span, failure)
 
 		return nil, failure
 	}
 
 	if parsed.LineageID != lineageID {
-		failure := errors.Join(errCorruptSnapshot, errLineageMismatch)
-		finishSnapshotSpan(span, "serialization", failure)
+		failure := wrapSnapshotFailure(
+			"serialization",
+			lineageID,
+			errors.Join(errCorruptSnapshot, errLineageMismatch),
+		)
+		finishSnapshotSpan(span, failure)
 
 		return nil, failure
 	}
 
 	err = snapshotContextError(ctx)
 	if err != nil {
-		finishSnapshotSpan(span, "serialization", err)
+		failure := wrapSnapshotFailure("serialization", lineageID, err)
+		finishSnapshotSpan(span, failure)
 
-		return nil, err
+		return nil, failure
 	}
 
 	span.SetAttributes(attribute.String("snapshot.component", "serialization"))
@@ -202,13 +244,36 @@ func snapshotContextError(ctx context.Context) error {
 	return errors.Join(ctx.Err(), context.Cause(ctx))
 }
 
-func finishSnapshotSpan(span trace.Span, component string, err error) {
+func finishSnapshotSpan(span trace.Span, err error) {
+	component, _ := snapshotErrorFields(err)
 	span.SetAttributes(
 		attribute.String("snapshot.component", component),
 		attribute.String("error.type", snapshotErrorType(err)),
 	)
-	span.RecordError(errors.New("snapshot operation failed"))
+	span.RecordError(err)
 	span.SetStatus(codes.Error, "snapshot operation failed")
+}
+
+func wrapSnapshotFailure(component, lineageID string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var failure *snapshotError
+	if errors.As(err, &failure) {
+		return err
+	}
+
+	return &snapshotError{component: component, lineageID: lineageID, cause: err}
+}
+
+func snapshotErrorFields(err error) (string, string) {
+	var failure *snapshotError
+	if errors.As(err, &failure) {
+		return failure.component, failure.lineageID
+	}
+
+	return "response", ""
 }
 
 func snapshotErrorType(err error) string {

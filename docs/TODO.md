@@ -34,3 +34,4 @@
 - [x] US-017 Deploy one loopback edge with private internal services
 - [x] US-018 Retain failed traces and a sample of successful operation
 - [x] US-019 Export a complete snapshot from the CLI
+- [x] US-020 Make production acquisition failures diagnosable

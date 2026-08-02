@@ -66,7 +66,7 @@ func TestObserveConstructsFreshContractResources(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 		defer cancel()
 
-		first, err := client.Observe(ctx)
+		first, err := client.Observe(ctx, testLineageID)
 		if err != nil {
 			t.Fatalf("first Observe() error = %v", err)
 		}
@@ -81,7 +81,7 @@ func TestObserveConstructsFreshContractResources(t *testing.T) {
 			t.Fatalf("first Observe() = %#v", firstItems)
 		}
 
-		second, err := client.Observe(ctx)
+		second, err := client.Observe(ctx, testLineageID)
 		if err != nil {
 			t.Fatalf("second Observe() error = %v", err)
 		}
@@ -132,14 +132,14 @@ func TestAcquisitionTelemetryIsBoundedAndSecretFree(t *testing.T) {
 		defer cancel()
 		ctx, root := tracerProvider.Tracer("test/root").Start(ctx, "lineage.sync")
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		root.End()
 		if err != nil || (*boards.Items)[0].Catalog.State != snapshot.StateFailed {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
 		}
 
 		assertAcquisitionSpans(t, spanExporter.GetSpans(), root.SpanContext())
-		assertAcquisitionMetrics(t, reader)
+		assertAcquisitionMetrics(t, reader, 1)
 		if strings.Count(strings.TrimSpace(logs.String()), "\n") != 0 || strings.TrimSpace(logs.String()) == "" {
 			t.Fatalf("terminal log count != 1: %q", logs.String())
 		}
@@ -156,6 +156,180 @@ func TestAcquisitionTelemetryIsBoundedAndSecretFree(t *testing.T) {
 		if err := tracerProvider.Shutdown(t.Context()); err != nil {
 			t.Fatalf("tracer shutdown error = %v", err)
 		}
+	})
+}
+
+func TestTerminalFailuresAggregatePerLineage(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		var logs bytes.Buffer
+		const secret = "resource-identifier-must-not-leak"
+		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+			if request.URL.Path == "/boards.json" {
+				return response(http.StatusOK,
+					`{"boards":[{"board":"`+secret+`-1"},{"board":"`+secret+`-2"},{"board":"`+secret+`-3"}]}`,
+					nil,
+				), nil
+			}
+
+			return response(http.StatusServiceUnavailable, "response-value-must-not-leak", nil), nil
+		})
+		policy := defaultPolicy()
+		policy.MaxRetries = 0
+		client := fakeClient(t, policy, transport, &logs, nil, nil)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer cancel()
+
+		boards, err := client.Observe(ctx, testLineageID)
+		if err != nil || boards.FailedResourceCount() != 3 {
+			t.Fatalf("Observe() = %#v, %v", boards, err)
+		}
+		if count := strings.Count(strings.TrimSpace(logs.String()), "\n") + 1; count != 1 {
+			t.Fatalf("aggregate log count = %d: %s", count, logs.String())
+		}
+
+		var record map[string]any
+		if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+			t.Fatalf("decode aggregate log: %v", err)
+		}
+		if record["failure.count"] != float64(3) || record["resource.type"] != catalogResource ||
+			record["failure.stage"] != stageRequest || record["error.type"] != errorHTTP ||
+			record["error.cause.type"] != causeHTTPStatus ||
+			record["http.response.status_code"] != float64(http.StatusServiceUnavailable) ||
+			record["retry.attempt"] != float64(0) || record["retry.exhausted"] != false {
+			t.Fatalf("aggregate fields = %#v", record)
+		}
+		for _, forbidden := range []string{secret, "response-value-must-not-leak", "example.test", "/catalog.json"} {
+			if strings.Contains(logs.String(), forbidden) {
+				t.Fatalf("aggregate disclosed %q: %s", forbidden, logs.String())
+			}
+		}
+	})
+}
+
+func TestFailureSummaryUsesControlledStagesAndCauses(t *testing.T) {
+	summary := newFailureSummary(testLineageID, nil, nil)
+	summary.add(boardsResource, lineageDeadlineFailure(stageQueue))
+	summary.add(catalogResource, lineageDeadlineFailure(stageRate))
+	summary.add(threadResource, lineageDeadlineFailure(stageConcurrency))
+	summary.add(threadResource, &requestError{
+		kind: errorHTTP, cause: errUnexpectedStatus, stage: stageRequest, status: http.StatusNotFound,
+	})
+	summary.add(threadResource, &requestError{
+		kind: errorNetwork, cause: io.ErrUnexpectedEOF, stage: stageBody, retryable: true, attempt: 2, exhausted: true,
+	})
+	summary.add(threadResource, &requestError{
+		kind: errorInvalid, cause: &json.SyntaxError{Offset: 1}, stage: stageDecode,
+	})
+	summary.add(threadResource, &requestError{
+		kind: errorDeadline, cause: errLineageDeadline, stage: stageRetry, attempt: 1, exhausted: true,
+	})
+
+	seenStages := make(map[string]bool)
+	for failure := range summary.counts {
+		seenStages[failure.stage] = true
+		if failure.errorType == "" || failure.causeType == "" {
+			t.Fatalf("unclassified failure = %#v", failure)
+		}
+	}
+	for _, stage := range []string{
+		stageQueue, stageRate, stageConcurrency, stageRequest, stageBody, stageDecode, stageRetry,
+	} {
+		if !seenStages[stage] {
+			t.Errorf("failure stage %q missing from %#v", stage, summary.counts)
+		}
+	}
+}
+
+func TestThreadCapacityWarningUsesRemainingRateBudget(t *testing.T) {
+	t.Run("idle gate includes immediate and fractional slots", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var logs bytes.Buffer
+			client := fakeClient(t, defaultPolicy(), blockingTransport(), &logs, nil, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 2500*time.Millisecond)
+			defer cancel()
+
+			client.warnThreadCapacity(ctx, testLineageID, make([]threadJob, 3))
+			client.warnThreadCapacity(ctx, testLineageID, make([]threadJob, 4))
+			if strings.Count(logs.String(), "thread acquisition exceeds remaining rate capacity") != 1 ||
+				!strings.Contains(logs.String(), `"resource.queued.count":4`) ||
+				!strings.Contains(logs.String(), `"resource.rate_capacity.count":3`) ||
+				!strings.Contains(logs.String(), `"lineage.id":"`+testLineageID+`"`) {
+				t.Fatalf("capacity logs = %s", logs.String())
+			}
+		})
+	})
+
+	t.Run("exact deadline boundary is excluded", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var logs bytes.Buffer
+			client := fakeClient(t, defaultPolicy(), blockingTransport(), &logs, nil, nil)
+			client.lastStart = time.Now()
+			ctx, cancel := context.WithDeadline(t.Context(), client.lastStart.Add(3*time.Second))
+			defer cancel()
+
+			client.warnThreadCapacity(ctx, testLineageID, make([]threadJob, 3))
+			if !strings.Contains(logs.String(), `"resource.queued.count":3`) ||
+				!strings.Contains(logs.String(), `"resource.rate_capacity.count":2`) {
+				t.Fatalf("capacity logs = %s", logs.String())
+			}
+		})
+	})
+
+	t.Run("prefailed jobs are not runnable", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var logs bytes.Buffer
+			client := fakeClient(t, defaultPolicy(), blockingTransport(), &logs, nil, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), 1500*time.Millisecond)
+			defer cancel()
+			jobs := []threadJob{
+				{},
+				{err: &requestError{kind: errorInvalid, stage: stageDecode}},
+				{},
+			}
+
+			client.warnThreadCapacity(ctx, testLineageID, jobs)
+			if logs.Len() != 0 {
+				t.Fatalf("capacity logs = %s", logs.String())
+			}
+		})
+	})
+}
+
+func TestRequestTimeoutSpanUsesRequestDeadlineCause(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		spanExporter := tracetest.NewInMemoryExporter()
+		tracerProvider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(spanExporter))
+		t.Cleanup(func() { _ = tracerProvider.Shutdown(t.Context()) })
+		policy := defaultPolicy()
+		policy.MaxRetries = 0
+		client := fakeClient(t, policy, blockingTransport(), io.Discard,
+			tracerProvider.Tracer("test/acquisition"), nil)
+		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+		defer cancel()
+
+		boards, err := client.Observe(ctx, testLineageID)
+		if err != nil || boards.State != snapshot.StateFailed {
+			t.Fatalf("Observe() = %#v, %v", boards, err)
+		}
+
+		for _, span := range spanExporter.GetSpans() {
+			if span.Name != "fetch.boards" {
+				continue
+			}
+			attributes := attributeValues(span.Attributes)
+			if attributes["error.type"] != errorTimeout ||
+				attributes["error.cause.type"] != causeRequestDeadline {
+				t.Fatalf("timeout span attributes = %#v", attributes)
+			}
+			if len(span.Events) != 1 ||
+				attributeValues(span.Events[0].Attributes)["error.cause.type"] != causeRequestDeadline {
+				t.Fatalf("timeout span events = %#v", span.Events)
+			}
+
+			return
+		}
+
+		t.Fatal("fetch.boards span missing")
 	})
 }
 
@@ -177,7 +351,7 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if err != nil || boards.State != snapshot.StatePresent {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
 		}
@@ -209,7 +383,7 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if err != nil || boards.State != snapshot.StatePresent || calls.Load() != 2 {
 			t.Fatalf("Observe() = %#v, %v calls=%d", boards, err, calls.Load())
 		}
@@ -225,7 +399,7 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if err != nil || boards.State != snapshot.StateFailed {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
 		}
@@ -242,7 +416,7 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if err != nil || boards.State != snapshot.StateFailed {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
 		}
@@ -258,7 +432,7 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if err != nil || boards.State != snapshot.StateFailed {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
 		}
@@ -280,7 +454,7 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if err != nil || boards.State != snapshot.StateFailed {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
 		}
@@ -301,7 +475,7 @@ func TestHTTPServerFailurePaths(t *testing.T) {
 		cause := errors.New("shutdown")
 		result := make(chan error, 1)
 		go func() {
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			if boards.State != "" || boards.Items != nil {
 				result <- errors.New("external cancellation returned partial boards")
 
@@ -352,7 +526,7 @@ func TestHTTPServerThreadBoundaries(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
 			defer cancel()
 
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			if err != nil {
 				t.Fatalf("Observe() error = %v", err)
 			}
@@ -399,7 +573,7 @@ func TestHTTPServerThreadFailures(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		thread := (*(*boards.Items)[0].Catalog.Pages)[0].Threads[0].Thread
 		if err != nil || calls.Load() != 2 || thread == nil || thread.State != snapshot.StatePresent {
 			t.Fatalf("Observe() = %#v, %v calls=%d", boards, err, calls.Load())
@@ -427,7 +601,7 @@ func TestHTTPServerThreadFailures(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 4*time.Second)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		thread := (*(*boards.Items)[0].Catalog.Pages)[0].Threads[0].Thread
 		if err != nil || calls.Load() != 1 || thread == nil || thread.State != snapshot.StateFailed || thread.Posts != nil {
 			t.Fatalf("Observe() = %#v, %v calls=%d", boards, err, calls.Load())
@@ -475,7 +649,7 @@ func TestThreadOversizeTelemetryIsBoundedAndSecretFree(t *testing.T) {
 		defer cancel()
 		ctx, root := tracerProvider.Tracer("test/root").Start(ctx, "lineage.sync")
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		root.End()
 		if err != nil || (*(*(*boards.Items)[0].Catalog.Pages)[0].Threads[0].Thread).State != snapshot.StateOversize {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
@@ -507,7 +681,7 @@ func TestThreadOversizeTelemetryIsBoundedAndSecretFree(t *testing.T) {
 			}
 		}
 
-		assertAcquisitionMetrics(t, reader)
+		assertAcquisitionMetrics(t, reader, 0)
 		if err := meterProvider.Shutdown(t.Context()); err != nil {
 			t.Fatalf("meter shutdown error = %v", err)
 		}
@@ -573,7 +747,10 @@ func assertTerminalLog(t *testing.T, data []byte) {
 		t.Fatalf("decode terminal log: %v", err)
 	}
 	if record["resource.type"] != catalogResource || record["error.type"] != errorNetwork ||
-		record["error.cause.type"] != causeNetwork {
+		record["error.cause.type"] != causeNetwork || record["failure.stage"] != stageRequest ||
+		record["http.response.status_code"] != float64(0) || record["retry.attempt"] != float64(1) ||
+		record["retry.exhausted"] != true || record["failure.count"] != float64(1) ||
+		record["lineage.id"] != testLineageID {
 		t.Fatalf("terminal log fields = %#v", record)
 	}
 	if _, exists := record["error"]; exists {
@@ -601,7 +778,7 @@ func assertValuesExclude(t *testing.T, values map[string]string, forbidden ...st
 	}
 }
 
-func assertAcquisitionMetrics(t *testing.T, reader *metricsdk.ManualReader) {
+func assertAcquisitionMetrics(t *testing.T, reader *metricsdk.ManualReader, wantFailures uint64) {
 	t.Helper()
 	var collected metricdata.ResourceMetrics
 	if err := reader.Collect(t.Context(), &collected); err != nil {
@@ -617,31 +794,48 @@ func assertAcquisitionMetrics(t *testing.T, reader *metricsdk.ManualReader) {
 			case metricdata.Sum[int64]:
 				for _, point := range data.DataPoints {
 					pointCount += uint64(point.Value)
-					assertMetricAttributes(t, point.Attributes.ToSlice())
+					assertMetricAttributes(t, item.Name, point.Attributes.ToSlice())
 				}
 			case metricdata.Histogram[float64]:
 				for _, point := range data.DataPoints {
 					pointCount += point.Count
-					assertMetricAttributes(t, point.Attributes.ToSlice())
+					assertMetricAttributes(t, item.Name, point.Attributes.ToSlice())
 				}
 			default:
 				t.Fatalf("unexpected metric data type %T", item.Data)
 			}
 		}
 	}
-	if metricCount != 2 || pointCount != 6 {
-		t.Fatalf("metric count=%d total points=%d, want 2 metrics across 3 attempts", metricCount, pointCount)
+	wantMetrics := 2
+	if wantFailures > 0 {
+		wantMetrics++
+	}
+	if metricCount != wantMetrics || pointCount != 6+wantFailures {
+		t.Fatalf("metric count=%d total points=%d, want %d metrics and %d points",
+			metricCount, pointCount, wantMetrics, 6+wantFailures)
 	}
 }
 
-func assertMetricAttributes(t *testing.T, attributes []attribute.KeyValue) {
+func assertMetricAttributes(t *testing.T, name string, attributes []attribute.KeyValue) {
 	t.Helper()
-	if len(attributes) != 3 {
-		t.Fatalf("metric attributes = %#v, want exactly 3", attributes)
+	allowed := map[attribute.Key]bool{
+		"resource.type": true, "error.type": true, "http.response.status_code": true,
 	}
+	want := 3
+	if name == "lineage.resource.failure.count" {
+		allowed["failure.stage"] = true
+		allowed["error.cause.type"] = true
+		allowed["retry.attempt"] = true
+		allowed["retry.exhausted"] = true
+		want = 7
+	}
+	if len(attributes) != want {
+		t.Fatalf("metric %q attributes = %#v, want exactly %d", name, attributes, want)
+	}
+
 	for _, item := range attributes {
-		if item.Key != "resource.type" && item.Key != "error.type" && item.Key != "http.response.status_code" {
-			t.Fatalf("unexpected metric attribute %q", item.Key)
+		if !allowed[item.Key] {
+			t.Fatalf("unexpected %q metric attribute %q", name, item.Key)
 		}
 	}
 }

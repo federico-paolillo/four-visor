@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"git.disroot.org/federico-paolillo/four-visor.git/snapshot"
+	"git.disroot.org/federico-paolillo/four-visor.git/telemetry"
 	"github.com/bradfitz/gomemcache/memcache"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -24,6 +25,32 @@ var (
 	errPreviousIncomplete = errors.New("previous lineage is incomplete")
 	errUnexpectedPointer  = errors.New("active lineage reconciliation returned an unexpected value")
 )
+
+const (
+	publicationStageValidation             = "validation"
+	publicationStageExpiration             = "expiration"
+	publicationStagePreviousPointer        = "previous_pointer"
+	publicationStagePreviousCompletion     = "previous_completion"
+	publicationStageBlockWrite             = "block_write"
+	publicationStageBlockVerification      = "block_verification"
+	publicationStageCompletionWrite        = "completion_write"
+	publicationStageCompletionVerification = "completion_verification"
+	publicationStageActivation             = "activation"
+	publicationStageCleanup                = "cleanup"
+)
+
+type publicationError struct {
+	stage string
+	cause error
+}
+
+func (failure *publicationError) Error() string {
+	return "lineage publication " + failure.stage + " failed"
+}
+
+func (failure *publicationError) Unwrap() error {
+	return failure.cause
+}
 
 // CleanupError reports cleanup failure after the new lineage has become active.
 type CleanupError struct {
@@ -54,10 +81,11 @@ func (failure *UncertainCommitError) Unwrap() []error {
 
 // Publisher validates and atomically activates immutable lineages in one Memcached server.
 type Publisher struct {
-	cache  *instrumentedCache
-	logger *slog.Logger
-	tracer trace.Tracer
-	now    func() time.Time
+	cache      *instrumentedCache
+	logger     *slog.Logger
+	tracer     trace.Tracer
+	activeSize metric.Int64Gauge
+	now        func() time.Time
 }
 
 type previousLineage struct {
@@ -104,7 +132,12 @@ func newPublisher(
 		return nil, err
 	}
 
-	return &Publisher{cache: cache, logger: logger, tracer: tracer, now: time.Now}, nil
+	activeSize, err := telemetry.LineageActiveSize.Int64Gauge(meter)
+	if err != nil {
+		return nil, fmt.Errorf("creating active lineage size gauge: %w", err)
+	}
+
+	return &Publisher{cache: cache, logger: logger, tracer: tracer, activeSize: activeSize, now: time.Now}, nil
 }
 
 // Publish stores and verifies value before atomically replacing the active pointer.
@@ -128,9 +161,10 @@ func (publisher *Publisher) Publish(
 	}
 
 	if previous.found && previous.id == lineage.id {
-		publisher.logFailure(ctx, "lineage publication failed", lineage.id, errLineageCollision)
+		failure := wrapPublicationFailure(publicationStageActivation, errLineageCollision)
+		publisher.logFailure(ctx, "lineage publication failed", lineage.id, failure)
 
-		return errLineageCollision
+		return failure
 	}
 
 	err = publisher.storeAndVerify(ctx, lineage)
@@ -142,6 +176,7 @@ func (publisher *Publisher) Publish(
 
 	expiration, err := publisher.activationExpiration(ctx, lineage.deadline)
 	if err != nil {
+		err = wrapPublicationFailure(publicationStageExpiration, err)
 		publisher.logFailure(ctx, "lineage publication failed", lineage.id, err)
 
 		return err
@@ -149,10 +184,13 @@ func (publisher *Publisher) Publish(
 
 	err = publisher.activate(ctx, lineage.id, expiration, previous)
 	if err != nil {
+		err = wrapPublicationFailure(publicationStageActivation, err)
 		publisher.logFailure(ctx, "lineage activation failed", lineage.id, err)
 
 		return err
 	}
+
+	publisher.activeSize.Record(ctx, int64(len(lineage.data)))
 
 	publisher.logger.InfoContext(ctx, "lineage activated", slog.String("lineage.id", lineage.id))
 
@@ -166,22 +204,31 @@ func (publisher *Publisher) prepare(
 ) (preparedLineage, error) {
 	data, err := publisher.validate(ctx, value)
 	if err != nil {
-		return preparedLineage{}, err
+		return preparedLineage{}, wrapPublicationFailure(publicationStageValidation, err)
 	}
 
 	deadline, err := publicationDeadline(publisher.now(), synchronizationInterval)
 	if err != nil {
-		return preparedLineage{}, fmt.Errorf("calculating lineage expiry: %w", err)
+		return preparedLineage{}, wrapPublicationFailure(
+			publicationStageExpiration,
+			fmt.Errorf("calculating lineage expiry: %w", err),
+		)
 	}
 
 	blocks, metadata, err := splitBlocks(data)
 	if err != nil {
-		return preparedLineage{}, fmt.Errorf("splitting lineage blocks: %w", err)
+		return preparedLineage{}, wrapPublicationFailure(
+			publicationStageBlockWrite,
+			fmt.Errorf("splitting lineage blocks: %w", err),
+		)
 	}
 
 	metadataBytes, err := encodeCompletion(metadata)
 	if err != nil {
-		return preparedLineage{}, fmt.Errorf("encoding lineage completion: %w", err)
+		return preparedLineage{}, wrapPublicationFailure(
+			publicationStageCompletionWrite,
+			fmt.Errorf("encoding lineage completion: %w", err),
+		)
 	}
 
 	return preparedLineage{
@@ -198,14 +245,20 @@ func (publisher *Publisher) storeAndVerify(ctx context.Context, lineage prepared
 	for index, block := range lineage.blocks {
 		expiration, err := memcachedExpiration(publisher.now(), lineage.deadline)
 		if err != nil {
-			return fmt.Errorf("calculating block expiry: %w", err)
+			return wrapPublicationFailure(
+				publicationStageExpiration,
+				fmt.Errorf("calculating block expiry: %w", err),
+			)
 		}
 
 		item := &memcache.Item{Key: blockKey(lineage.id, index), Value: block, Expiration: expiration}
 
 		err = publisher.addBeforeActivation(ctx, item)
 		if err != nil {
-			return fmt.Errorf("writing lineage block: %w", err)
+			return wrapPublicationFailure(
+				publicationStageBlockWrite,
+				fmt.Errorf("writing lineage block: %w", err),
+			)
 		}
 	}
 
@@ -213,11 +266,14 @@ func (publisher *Publisher) storeAndVerify(ctx context.Context, lineage prepared
 	for index, want := range lineage.blocks {
 		item, err := publisher.getBeforeActivation(ctx, blockKey(lineage.id, index))
 		if err != nil {
-			return fmt.Errorf("verifying lineage block: %w", err)
+			return wrapPublicationFailure(
+				publicationStageBlockVerification,
+				fmt.Errorf("verifying lineage block: %w", err),
+			)
 		}
 
 		if !bytes.Equal(item.Value, want) {
-			return errVerificationFailed
+			return wrapPublicationFailure(publicationStageBlockVerification, errVerificationFailed)
 		}
 
 		verified[index] = item.Value
@@ -225,11 +281,14 @@ func (publisher *Publisher) storeAndVerify(ctx context.Context, lineage prepared
 
 	reassembled, err := reassemble(lineage.metadata, verified)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errVerificationFailed, err)
+		return wrapPublicationFailure(
+			publicationStageBlockVerification,
+			fmt.Errorf("%w: %w", errVerificationFailed, err),
+		)
 	}
 
 	if !bytes.Equal(reassembled, lineage.data) {
-		return errVerificationFailed
+		return wrapPublicationFailure(publicationStageBlockVerification, errVerificationFailed)
 	}
 
 	return publisher.storeAndVerifyCompletion(ctx, lineage)
@@ -238,7 +297,10 @@ func (publisher *Publisher) storeAndVerify(ctx context.Context, lineage prepared
 func (publisher *Publisher) storeAndVerifyCompletion(ctx context.Context, lineage preparedLineage) error {
 	expiration, err := memcachedExpiration(publisher.now(), lineage.deadline)
 	if err != nil {
-		return fmt.Errorf("calculating completion expiry: %w", err)
+		return wrapPublicationFailure(
+			publicationStageExpiration,
+			fmt.Errorf("calculating completion expiry: %w", err),
+		)
 	}
 
 	item := &memcache.Item{
@@ -249,16 +311,22 @@ func (publisher *Publisher) storeAndVerifyCompletion(ctx context.Context, lineag
 
 	err = publisher.addBeforeActivation(ctx, item)
 	if err != nil {
-		return fmt.Errorf("writing lineage completion: %w", err)
+		return wrapPublicationFailure(
+			publicationStageCompletionWrite,
+			fmt.Errorf("writing lineage completion: %w", err),
+		)
 	}
 
 	stored, err := publisher.getBeforeActivation(ctx, item.Key)
 	if err != nil {
-		return fmt.Errorf("verifying lineage completion: %w", err)
+		return wrapPublicationFailure(
+			publicationStageCompletionVerification,
+			fmt.Errorf("verifying lineage completion: %w", err),
+		)
 	}
 
 	if !bytes.Equal(stored.Value, lineage.metadataBytes) {
-		return errVerificationFailed
+		return wrapPublicationFailure(publicationStageCompletionVerification, errVerificationFailed)
 	}
 
 	return nil
@@ -284,7 +352,7 @@ func (publisher *Publisher) validate(ctx context.Context, value snapshot.Snapsho
 
 	data, err := snapshot.Marshal(value)
 	if err != nil {
-		finishLifecycleSpan(span, "validation_failed", err)
+		finishLifecycleSpan(span, "validation_failed", wrapPublicationFailure(publicationStageValidation, err))
 
 		return nil, fmt.Errorf("validating lineage: %w", err)
 	}
@@ -293,7 +361,7 @@ func (publisher *Publisher) validate(ctx context.Context, value snapshot.Snapsho
 
 	err = cancellationError(ctx)
 	if err != nil {
-		finishLifecycleSpan(span, "canceled", err)
+		finishLifecycleSpan(span, "canceled", wrapPublicationFailure(publicationStageValidation, err))
 
 		return nil, err
 	}
@@ -310,7 +378,10 @@ func (publisher *Publisher) previous(ctx context.Context) (previousLineage, erro
 	}
 
 	if err != nil {
-		return previousLineage{}, fmt.Errorf("reading active lineage pointer: %w", err)
+		return previousLineage{}, wrapPublicationFailure(
+			publicationStagePreviousPointer,
+			fmt.Errorf("reading active lineage pointer: %w", err),
+		)
 	}
 
 	id := string(item.Value)
@@ -330,7 +401,10 @@ func (publisher *Publisher) previous(ctx context.Context) (previousLineage, erro
 	}
 
 	if err != nil {
-		return previousLineage{}, fmt.Errorf("reading active lineage completion: %w", err)
+		return previousLineage{}, wrapPublicationFailure(
+			publicationStagePreviousCompletion,
+			fmt.Errorf("reading active lineage completion: %w", err),
+		)
 	}
 
 	previous.metadata, err = decodeCompletion(item.Value)
@@ -383,7 +457,7 @@ func (publisher *Publisher) activate(
 
 	err := cancellationError(ctx)
 	if err != nil {
-		finishLifecycleSpan(span, "canceled", err)
+		finishLifecycleSpan(span, "canceled", wrapPublicationFailure(publicationStageActivation, err))
 
 		return err
 	}
@@ -409,7 +483,7 @@ func (publisher *Publisher) activate(
 
 			return nil
 		case previous.found && string(observed.Value) == previous.id:
-			finishLifecycleSpan(span, "failed", setError)
+			finishLifecycleSpan(span, "failed", wrapPublicationFailure(publicationStageActivation, setError))
 
 			return fmt.Errorf("setting active lineage pointer: %w", setError)
 		default:
@@ -418,7 +492,7 @@ func (publisher *Publisher) activate(
 	}
 
 	uncertain := &UncertainCommitError{setError: setError, getError: getError}
-	finishLifecycleSpan(span, "uncertain", uncertain)
+	finishLifecycleSpan(span, "uncertain", wrapPublicationFailure(publicationStageActivation, uncertain))
 
 	return uncertain
 }
@@ -451,10 +525,12 @@ func (publisher *Publisher) evictPrevious(ctx context.Context, previous previous
 	}
 
 	if cleanupErr != nil {
-		failure := &CleanupError{cause: cleanupErr}
+		failure := &CleanupError{cause: wrapPublicationFailure(publicationStageCleanup, cleanupErr)}
 		finishLifecycleSpan(span, "failed", failure)
 		publisher.logger.ErrorContext(ctx, "previous lineage eviction failed",
 			slog.String("error.type", classifyError(failure)),
+			slog.String("error.detail", errorDetail(failure)),
+			slog.String("publication.stage", publicationStage(failure)),
 		)
 
 		return failure
@@ -492,13 +568,19 @@ func finishLifecycleSpan(span trace.Span, outcome string, err error) {
 	span.SetAttributes(
 		attribute.String("lineage.outcome", outcome),
 		attribute.String("error.type", classifyError(err)),
+		attribute.String("error.detail", errorDetail(err)),
+		attribute.String("publication.stage", publicationStage(err)),
 	)
-	span.RecordError(errors.New("lineage lifecycle operation failed"))
+	span.RecordError(err)
 	span.SetStatus(codes.Error, "lineage lifecycle operation failed")
 }
 
 func (publisher *Publisher) logFailure(ctx context.Context, message, lineageID string, err error) {
-	attributes := []any{slog.String("error.type", classifyError(err))}
+	attributes := []any{
+		slog.String("error.type", classifyError(err)),
+		slog.String("error.detail", errorDetail(err)),
+		slog.String("publication.stage", publicationStage(err)),
+	}
 	if snapshot.ValidLineageID(lineageID) {
 		attributes = append(attributes, slog.String("lineage.id", lineageID))
 	}
@@ -512,6 +594,23 @@ func classifyError(err error) string {
 		return "uncertain_commit"
 	}
 
+	if errorType := snapshotPublicationErrorType(err); errorType != "" {
+		return errorType
+	}
+
+	if errorType := knownPublicationErrorType(err); errorType != "" {
+		return errorType
+	}
+
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		return "unavailable"
+	}
+
+	return "failed"
+}
+
+func knownPublicationErrorType(err error) string {
 	switch {
 	case err == nil:
 		return "none"
@@ -525,14 +624,99 @@ func classifyError(err error) string {
 		return "not_stored"
 	case errors.Is(err, errVerificationFailed):
 		return "verification_failed"
+	case errors.Is(err, errLineageCollision):
+		return "conflict"
+	case errors.Is(err, errInvalidCompletion), errors.Is(err, errPreviousIncomplete):
+		return "invalid_completion"
 	case errors.Is(err, errInvalidInterval), errors.Is(err, errExpiredPublication):
 		return "invalid_expiry"
 	}
 
-	var networkError net.Error
-	if errors.As(err, &networkError) {
-		return "unavailable"
+	return ""
+}
+
+func snapshotPublicationErrorType(err error) string {
+	switch {
+	case errors.Is(err, snapshot.ErrInvalidJSON):
+		return "snapshot_invalid_json"
+	case errors.Is(err, snapshot.ErrInvalidContract):
+		return "snapshot_invalid_contract"
+	case errors.Is(err, snapshot.ErrUnsupportedVersion):
+		return "snapshot_unsupported_version"
 	}
 
-	return "invalid"
+	return ""
+}
+
+func wrapPublicationFailure(stage string, err error) error {
+	if err == nil {
+		return nil
+	}
+
+	var failure *publicationError
+	if errors.As(err, &failure) {
+		return err
+	}
+
+	return &publicationError{stage: stage, cause: err}
+}
+
+func publicationStage(err error) string {
+	var failure *publicationError
+	if errors.As(err, &failure) {
+		return failure.stage
+	}
+
+	return "unknown"
+}
+
+func errorDetail(err error) string {
+	if detail := snapshotPublicationErrorDetail(err); detail != "" {
+		return detail
+	}
+
+	if detail := knownPublicationErrorDetail(err); detail != "" {
+		return detail
+	}
+
+	return "other"
+}
+
+func snapshotPublicationErrorDetail(err error) string {
+	var validationError *snapshot.Error
+	if errors.As(err, &validationError) {
+		return validationError.Detail()
+	}
+
+	switch {
+	case errors.Is(err, snapshot.ErrInvalidJSON):
+		return "invalid_json"
+	case errors.Is(err, snapshot.ErrInvalidContract):
+		return "invalid_contract"
+	case errors.Is(err, snapshot.ErrUnsupportedVersion):
+		return "unsupported_version"
+	}
+
+	return ""
+}
+
+func knownPublicationErrorDetail(err error) string {
+	switch {
+	case errors.Is(err, errLineageCollision):
+		return "lineage_collision"
+	case errors.Is(err, errUnexpectedPointer):
+		return "unexpected_pointer"
+	case errors.Is(err, errPreviousIncomplete):
+		return "previous_incomplete"
+	case errors.Is(err, errInvalidCompletion):
+		return "invalid_completion"
+	case errors.Is(err, errVerificationFailed):
+		return "content_mismatch"
+	case errors.Is(err, errExpiredPublication):
+		return "publication_expired"
+	case errors.Is(err, errInvalidInterval):
+		return "invalid_interval"
+	}
+
+	return ""
 }

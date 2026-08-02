@@ -21,8 +21,10 @@ const (
 	CacheOperationDuration
 	LineageSynchronizationDuration
 	LineageSynchronizationActivated
+	LineageResourceFailureCount
 	LineageFailedResourceCount
 	LineageActiveAge
+	LineageActiveSize
 )
 
 const (
@@ -93,6 +95,21 @@ var metricCatalogue = [...]metricDefinition{
 		description: "Number of activated successful or degraded lineages.",
 		attributes:  []attribute.Key{lineageOutcomeKey},
 	},
+	LineageResourceFailureCount: {
+		name:        "lineage.resource.failure.count",
+		kind:        metricsdk.InstrumentKindCounter,
+		unit:        "{failure}",
+		description: "Number of terminal acquisition resource failures.",
+		attributes: []attribute.Key{
+			resourceTypeKey,
+			"failure.stage",
+			errorTypeKey,
+			"error.cause.type",
+			httpResponseStatusCodeKey,
+			"retry.attempt",
+			"retry.exhausted",
+		},
+	},
 	LineageFailedResourceCount: {
 		name:        "lineage.failed_resource.count",
 		kind:        metricsdk.InstrumentKindHistogram,
@@ -104,6 +121,12 @@ var metricCatalogue = [...]metricDefinition{
 		kind:        metricsdk.InstrumentKindObservableGauge,
 		unit:        "s",
 		description: "Age of the lineage activated by this process.",
+	},
+	LineageActiveSize: {
+		name:        "lineage.active.size",
+		kind:        metricsdk.InstrumentKindGauge,
+		unit:        "By",
+		description: "Serialized size of the active lineage.",
 	},
 }
 
@@ -148,6 +171,23 @@ func (item Metric) Int64Histogram(meter metric.Meter) (metric.Int64Histogram, er
 	definition := metricCatalogue[item]
 
 	instrument, err := meter.Int64Histogram(definition.name,
+		metric.WithDescription(definition.description),
+		metric.WithUnit(definition.unit),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("creating metric %q: %w", definition.name, err)
+	}
+
+	return instrument, nil
+}
+
+// Int64Gauge creates this catalogue metric as a synchronous integer gauge.
+//
+//nolint:ireturn // OpenTelemetry instruments are interfaces.
+func (item Metric) Int64Gauge(meter metric.Meter) (metric.Int64Gauge, error) {
+	definition := metricCatalogue[item]
+
+	instrument, err := meter.Int64Gauge(definition.name,
 		metric.WithDescription(definition.description),
 		metric.WithUnit(definition.unit),
 	)

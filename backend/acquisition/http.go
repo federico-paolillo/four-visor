@@ -38,6 +38,7 @@ const (
 	causeLineageDeadline = "lineage_deadline"
 	causeNetwork         = "network"
 	causeOther           = "other"
+	causeRequestDeadline = "request_deadline"
 	causeUnexpectedEOF   = "unexpected_eof"
 )
 
@@ -53,6 +54,9 @@ type requestError struct {
 	retryable  bool
 	retryAfter time.Duration
 	status     int
+	stage      string
+	attempt    int
+	exhausted  bool
 }
 
 func (failure *requestError) Error() string {
@@ -63,10 +67,10 @@ func (failure *requestError) Unwrap() error {
 	return failure.cause
 }
 
-func (client *Client) fetchBoards(ctx context.Context) ([]observedBoard, error) {
+func (client *Client) fetchBoards(ctx context.Context, lineageID string) ([]observedBoard, error) {
 	var boards []observedBoard
 
-	err := client.fetch(ctx, boardsResource, client.boardsURL(), func(_ context.Context, data []byte) error {
+	err := client.fetch(ctx, lineageID, boardsResource, client.boardsURL(), func(_ context.Context, data []byte) error {
 		var parseError error
 
 		boards, parseError = parseBoards(data)
@@ -77,25 +81,36 @@ func (client *Client) fetchBoards(ctx context.Context) ([]observedBoard, error) 
 	return boards, err
 }
 
-func (client *Client) fetchCatalog(ctx context.Context, board string) ([]snapshot.Page, error) {
+func (client *Client) fetchCatalog(ctx context.Context, lineageID, board string) ([]snapshot.Page, error) {
 	var pages []snapshot.Page
 
-	err := client.fetch(ctx, catalogResource, client.catalogURL(board), func(_ context.Context, data []byte) error {
-		var parseError error
+	err := client.fetch(
+		ctx,
+		lineageID,
+		catalogResource,
+		client.catalogURL(board),
+		func(_ context.Context, data []byte) error {
+			var parseError error
 
-		pages, parseError = parseCatalog(data)
+			pages, parseError = parseCatalog(data)
 
-		return parseError
-	})
+			return parseError
+		},
+	)
 
 	return pages, err
 }
 
-func (client *Client) fetchThread(ctx context.Context, board string, number uint64) (snapshot.Thread, error) {
+func (client *Client) fetchThread(
+	ctx context.Context,
+	lineageID, board string,
+	number uint64,
+) (snapshot.Thread, error) {
 	var thread snapshot.Thread
 
 	err := client.fetch(
 		ctx,
+		lineageID,
 		threadResource,
 		client.threadURL(board, number),
 		func(attemptCtx context.Context, data []byte) error {
@@ -109,6 +124,7 @@ func (client *Client) fetchThread(ctx context.Context, board string, number uint
 				}
 				trace.SpanFromContext(attemptCtx).SetAttributes(attributes...)
 				client.logger.WarnContext(attemptCtx, "oversized thread detected",
+					slog.String("lineage.id", lineageID),
 					slog.String("resource.type", threadResource),
 					slog.String("resource.state", string(snapshot.StateOversize)),
 					slog.Int("posts.limit", snapshot.MaximumThreadPosts),
@@ -124,16 +140,18 @@ func (client *Client) fetchThread(ctx context.Context, board string, number uint
 
 func (client *Client) fetch(
 	ctx context.Context,
-	resource, target string,
+	lineageID, resource, target string,
 	decode func(context.Context, []byte) error,
 ) error {
 	for attempt := 0; attempt <= client.policy.MaxRetries; attempt++ {
-		failure := client.attempt(ctx, resource, target, attempt, decode)
+		failure := client.attempt(ctx, lineageID, resource, target, attempt, decode)
 		if failure == nil {
 			return nil
 		}
 
 		if !failure.retryable || attempt == client.policy.MaxRetries {
+			failure.exhausted = failure.retryable
+
 			return failure
 		}
 
@@ -141,6 +159,9 @@ func (client *Client) fetch(
 
 		waitFailure := waitUntilRetry(ctx, delay)
 		if waitFailure != nil {
+			waitFailure.attempt = attempt + 1
+			waitFailure.exhausted = true
+
 			return waitFailure
 		}
 	}
@@ -150,30 +171,14 @@ func (client *Client) fetch(
 
 func (client *Client) attempt(
 	ctx context.Context,
-	resource, target string,
+	lineageID, resource, target string,
 	attempt int,
 	decode func(context.Context, []byte) error,
 ) *requestError {
-	release, failure := client.beginAttempt(ctx)
-	if failure != nil {
-		return failure
-	}
-	defer release()
-
-	attemptCtx, cancel := context.WithTimeoutCause(ctx, client.policy.RequestTimeout, errRequestTimeout)
-	defer cancel()
-
-	// Each lineage is built from scratch, so no prior representation exists for conditional requests.
-	request, err := http.NewRequestWithContext(attemptCtx, http.MethodGet, target, http.NoBody)
-	if err != nil {
-		return &requestError{kind: errorInvalid, cause: err}
-	}
-
-	request.Header.Set("User-Agent", client.userAgent)
-
-	attemptCtx, span := client.tracer.Start(attemptCtx, "fetch."+resource,
+	attemptCtx, span := client.tracer.Start(ctx, "fetch."+resource,
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
+			attribute.String("lineage.id", lineageID),
 			attribute.String("resource.type", resource),
 			attribute.String("http.request.method", http.MethodGet),
 			attribute.Int("retry.attempt", attempt),
@@ -181,10 +186,39 @@ func (client *Client) attempt(
 	)
 	defer span.End()
 
+	release, failure := client.beginAttempt(attemptCtx)
+	if failure != nil {
+		failure.attempt = attempt
+		finishSpan(span, failure)
+
+		return failure
+	}
+	defer release()
+
+	attemptCtx, cancel := context.WithTimeoutCause(attemptCtx, client.policy.RequestTimeout, errRequestTimeout)
+	defer cancel()
+
+	// Each lineage is built from scratch, so no prior representation exists for conditional requests.
+	request, err := http.NewRequestWithContext(attemptCtx, http.MethodGet, target, http.NoBody)
+	if err != nil {
+		failure = &requestError{kind: errorInvalid, cause: err, stage: stageRequest, attempt: attempt}
+		finishSpan(span, failure)
+
+		return failure
+	}
+
+	request.Header.Set("User-Agent", client.userAgent)
+
 	request = request.WithContext(attemptCtx)
 
 	started := time.Now()
+
 	result := client.perform(attemptCtx, request, decode)
+	if result != nil {
+		result.attempt = attempt
+		result.exhausted = result.retryable && attempt == client.policy.MaxRetries
+	}
+
 	client.recordAttempt(attemptCtx, resource, time.Since(started), result)
 	finishSpan(span, result)
 
@@ -198,12 +232,14 @@ func (client *Client) perform(
 ) *requestError {
 	response, err := client.httpClient.Do(request)
 	if err != nil {
-		return interruptedRequest(ctx, err)
+		return interruptedRequest(ctx, err, stageRequest)
 	}
 	defer response.Body.Close() //nolint:errcheck // A completed GET has no close-error recovery action.
 
 	if response.StatusCode != http.StatusOK {
-		failure := &requestError{kind: errorHTTP, cause: errUnexpectedStatus, status: response.StatusCode}
+		failure := &requestError{
+			kind: errorHTTP, cause: errUnexpectedStatus, status: response.StatusCode, stage: stageRequest,
+		}
 		if response.StatusCode == http.StatusTooManyRequests {
 			failure.kind = errorRateLimit
 			failure.retryable = true
@@ -215,23 +251,23 @@ func (client *Client) perform(
 
 	body, err := io.ReadAll(response.Body)
 	if err != nil {
-		return interruptedRequest(ctx, err)
+		return interruptedRequest(ctx, err, stageBody)
 	}
 
 	cause := context.Cause(ctx)
 	if cause != nil {
-		return interruptedRequest(ctx, cause)
+		return interruptedRequest(ctx, cause, stageBody)
 	}
 
 	err = decode(ctx, body)
 
 	cause = context.Cause(ctx)
 	if cause != nil {
-		return interruptedRequest(ctx, cause)
+		return interruptedRequest(ctx, cause, stageDecode)
 	}
 
 	if err != nil {
-		return &requestError{kind: errorInvalid, cause: err, status: response.StatusCode}
+		return &requestError{kind: errorInvalid, cause: err, status: response.StatusCode, stage: stageDecode}
 	}
 
 	return nil
@@ -241,14 +277,14 @@ func (client *Client) beginAttempt(ctx context.Context) (func(), *requestError) 
 	select {
 	case <-client.rateGate:
 	case <-ctx.Done():
-		return nil, contextFailure(ctx)
+		return nil, contextFailure(ctx, stageQueue)
 	}
 
 	releaseGate := func() { client.rateGate <- struct{}{} }
 	if ctx.Err() != nil {
 		releaseGate()
 
-		return nil, contextFailure(ctx)
+		return nil, contextFailure(ctx, stageQueue)
 	}
 
 	delay := time.Until(client.lastStart.Add(client.policy.RateInterval))
@@ -257,10 +293,10 @@ func (client *Client) beginAttempt(ctx context.Context) (func(), *requestError) 
 		if !fitsDeadline(ctx, delay) {
 			releaseGate()
 
-			return nil, lineageDeadlineFailure()
+			return nil, lineageDeadlineFailure(stageRate)
 		}
 
-		failure := wait(ctx, delay)
+		failure := wait(ctx, delay, stageRate)
 		if failure != nil {
 			releaseGate()
 
@@ -274,7 +310,7 @@ func (client *Client) beginAttempt(ctx context.Context) (func(), *requestError) 
 			<-client.concurrency
 			releaseGate()
 
-			return nil, contextFailure(ctx)
+			return nil, contextFailure(ctx, stageConcurrency)
 		}
 
 		client.lastStart = time.Now()
@@ -285,19 +321,19 @@ func (client *Client) beginAttempt(ctx context.Context) (func(), *requestError) 
 	case <-ctx.Done():
 		releaseGate()
 
-		return nil, contextFailure(ctx)
+		return nil, contextFailure(ctx, stageConcurrency)
 	}
 }
 
 func waitUntilRetry(ctx context.Context, delay time.Duration) *requestError {
 	if !fitsDeadline(ctx, delay) {
-		return lineageDeadlineFailure()
+		return lineageDeadlineFailure(stageRetry)
 	}
 
-	return wait(ctx, delay)
+	return wait(ctx, delay, stageRetry)
 }
 
-func wait(ctx context.Context, delay time.Duration) *requestError {
+func wait(ctx context.Context, delay time.Duration, stage string) *requestError {
 	timer := time.NewTimer(delay)
 	defer timer.Stop()
 
@@ -305,7 +341,7 @@ func wait(ctx context.Context, delay time.Duration) *requestError {
 	case <-timer.C:
 		return nil
 	case <-ctx.Done():
-		return contextFailure(ctx)
+		return contextFailure(ctx, stage)
 	}
 }
 
@@ -315,32 +351,32 @@ func fitsDeadline(ctx context.Context, delay time.Duration) bool {
 	return !ok || time.Now().Add(delay).Before(deadline)
 }
 
-func contextFailure(ctx context.Context) *requestError {
+func contextFailure(ctx context.Context, stage string) *requestError {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return lineageDeadlineFailure()
+		return lineageDeadlineFailure(stage)
 	}
 
-	return &requestError{kind: errorCanceled, cause: context.Cause(ctx)}
+	return &requestError{kind: errorCanceled, cause: context.Cause(ctx), stage: stage}
 }
 
-func interruptedRequest(ctx context.Context, fallback error) *requestError {
+func interruptedRequest(ctx context.Context, fallback error, stage string) *requestError {
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		if errors.Is(context.Cause(ctx), errRequestTimeout) {
-			return &requestError{kind: errorTimeout, cause: fallback, retryable: true}
+			return &requestError{kind: errorTimeout, cause: fallback, retryable: true, stage: stage}
 		}
 
-		return lineageDeadlineFailure()
+		return lineageDeadlineFailure(stage)
 	}
 
 	if errors.Is(ctx.Err(), context.Canceled) {
-		return &requestError{kind: errorCanceled, cause: context.Cause(ctx)}
+		return &requestError{kind: errorCanceled, cause: context.Cause(ctx), stage: stage}
 	}
 
-	return &requestError{kind: errorNetwork, cause: fallback, retryable: true}
+	return &requestError{kind: errorNetwork, cause: fallback, retryable: true, stage: stage}
 }
 
-func lineageDeadlineFailure() *requestError {
-	return &requestError{kind: errorDeadline, cause: errLineageDeadline}
+func lineageDeadlineFailure(stage string) *requestError {
+	return &requestError{kind: errorDeadline, cause: errLineageDeadline, stage: stage}
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {
@@ -436,28 +472,26 @@ func finishSpan(span trace.Span, failure *requestError) {
 		return
 	}
 
-	causeType := errorCauseType(failure.cause)
+	causeType := requestErrorCauseType(failure)
 	span.RecordError(failure, trace.WithAttributes(attribute.String("error.cause.type", causeType)))
 	span.SetStatus(codes.Error, "upstream acquisition failed")
 	span.SetAttributes(
+		attribute.String("failure.stage", failure.stage),
 		attribute.String("error.type", failure.kind),
 		attribute.String("error.cause.type", causeType),
 		attribute.Int("http.response.status_code", failure.status),
+		attribute.Int("retry.attempt", failure.attempt),
+		attribute.Bool("retry.exhausted", failure.exhausted),
 	)
-}
-
-func errorType(err error) string {
-	var failure *requestError
-	if errors.As(err, &failure) {
-		return failure.kind
-	}
-
-	return "unknown"
 }
 
 func requestErrorCauseType(err error) string {
 	var failure *requestError
 	if errors.As(err, &failure) {
+		if failure.kind == errorTimeout {
+			return causeRequestDeadline
+		}
+
 		return errorCauseType(failure.cause)
 	}
 

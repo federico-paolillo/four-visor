@@ -64,19 +64,21 @@ func exportSnapshot(parent context.Context, args []string, stderr io.Writer, htt
 	ctx, cancel := context.WithTimeout(signalCtx, synchronization.LineageDeadline)
 	defer cancel()
 
-	boards, err := client.Observe(ctx)
-	if err != nil {
-		return fmt.Errorf("acquiring snapshot: %w", err)
-	}
-
 	identifier, err := ulid.New(ulid.Timestamp(startedAt), ulid.DefaultEntropy())
 	if err != nil {
 		return fmt.Errorf("generating snapshot lineage identifier: %w", err)
 	}
 
+	lineageID := identifier.String()
+
+	boards, err := client.Observe(ctx, lineageID)
+	if err != nil {
+		return fmt.Errorf("acquiring snapshot: %w", err)
+	}
+
 	data, err := snapshot.Marshal(snapshot.Snapshot{
 		SchemaVersion: snapshot.Version,
-		LineageID:     identifier.String(),
+		LineageID:     lineageID,
 		ObservedAt:    startedAt.Format(time.RFC3339Nano),
 		Boards:        boards,
 	})

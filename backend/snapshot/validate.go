@@ -44,6 +44,11 @@ func (validationError *Error) Error() string {
 	return fmt.Sprintf("%s at %s: %s", validationError.kind, validationError.path, validationError.problem)
 }
 
+// Detail returns the controlled path and problem without the rejected value.
+func (validationError *Error) Detail() string {
+	return validationError.path + ": " + validationError.problem
+}
+
 // Is exposes the validation classification to errors.Is.
 func (validationError *Error) Is(target error) bool {
 	return target == validationError.kind

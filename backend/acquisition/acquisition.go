@@ -24,7 +24,9 @@ const officialBaseURL = "https://a.4cdn.org"
 var (
 	// ErrLineageDeadlineRequired reports a caller that omitted the construction deadline.
 	ErrLineageDeadlineRequired = errors.New("lineage deadline is required")
-	errInvalidPolicy           = errors.New("invalid acquisition policy")
+	// ErrLineageIDRequired reports a caller that omitted a valid correlation identifier.
+	ErrLineageIDRequired = errors.New("valid lineage identifier is required")
+	errInvalidPolicy     = errors.New("invalid acquisition policy")
 )
 
 // Policy defines the bounded behavior shared by every request through a Client.
@@ -46,9 +48,16 @@ type Client struct {
 	tracer      trace.Tracer
 	requests    metric.Int64Counter
 	duration    metric.Float64Histogram
+	failures    metric.Int64Counter
 	rateGate    chan struct{}
 	concurrency chan struct{}
 	lastStart   time.Time
+}
+
+type clientMetrics struct {
+	requests metric.Int64Counter
+	duration metric.Float64Histogram
+	failures metric.Int64Counter
 }
 
 type threadJob struct {
@@ -108,14 +117,9 @@ func newClient(
 		return nil, fmt.Errorf("%w: invalid upstream base URL", errInvalidPolicy)
 	}
 
-	requests, err := telemetry.HTTPClientRequestCount.Int64Counter(meter)
+	metrics, err := createClientMetrics(meter)
 	if err != nil {
-		return nil, fmt.Errorf("creating HTTP client request counter: %w", err)
-	}
-
-	duration, err := telemetry.HTTPClientRequestDuration.Float64Histogram(meter)
-	if err != nil {
-		return nil, fmt.Errorf("creating HTTP client duration histogram: %w", err)
+		return nil, err
 	}
 
 	rateGate := make(chan struct{}, 1)
@@ -128,33 +132,57 @@ func newClient(
 		httpClient:  httpClient,
 		logger:      logger,
 		tracer:      tracer,
-		requests:    requests,
-		duration:    duration,
+		requests:    metrics.requests,
+		duration:    metrics.duration,
+		failures:    metrics.failures,
 		rateGate:    rateGate,
 		concurrency: make(chan struct{}, policy.MaxConcurrency),
 	}, nil
 }
 
-// Observe constructs fresh board, catalog, and thread resources under the caller's lineage deadline.
-func (client *Client) Observe(ctx context.Context) (snapshot.Boards, error) {
-	if _, ok := ctx.Deadline(); !ok {
-		return snapshot.Boards{}, ErrLineageDeadlineRequired
+func createClientMetrics(meter metric.Meter) (clientMetrics, error) {
+	requests, err := telemetry.HTTPClientRequestCount.Int64Counter(meter)
+	if err != nil {
+		return clientMetrics{}, fmt.Errorf("creating HTTP client request counter: %w", err)
 	}
 
-	boards, err := client.fetchBoards(ctx)
+	duration, err := telemetry.HTTPClientRequestDuration.Float64Histogram(meter)
+	if err != nil {
+		return clientMetrics{}, fmt.Errorf("creating HTTP client duration histogram: %w", err)
+	}
+
+	failures, err := telemetry.LineageResourceFailureCount.Int64Counter(meter)
+	if err != nil {
+		return clientMetrics{}, fmt.Errorf("creating lineage resource failure counter: %w", err)
+	}
+
+	return clientMetrics{requests: requests, duration: duration, failures: failures}, nil
+}
+
+// Observe constructs fresh board, catalog, and thread resources under the caller's lineage deadline.
+func (client *Client) Observe(ctx context.Context, lineageID string) (snapshot.Boards, error) {
+	err := validateObservation(ctx, lineageID)
+	if err != nil {
+		return snapshot.Boards{}, err
+	}
+
+	failures := newFailureSummary(lineageID, client.logger, client.failures)
+	defer failures.flush(ctx)
+
+	boards, err := client.fetchBoards(ctx, lineageID)
 	if err != nil {
 		cancellation := externalCancellation(ctx)
 		if cancellation != nil {
 			return snapshot.Boards{}, cancellation
 		}
 
-		client.logFailure(ctx, boardsResource, err)
+		failures.add(boardsResource, err)
 
 		return snapshot.Boards{State: snapshot.StateFailed}, nil
 	}
 
 	items := make([]snapshot.BoardItem, len(boards))
-	failures := make([]error, len(boards))
+	catalogErrors := make([]error, len(boards))
 
 	var wait sync.WaitGroup
 
@@ -162,9 +190,9 @@ func (client *Client) Observe(ctx context.Context) (snapshot.Boards, error) {
 		items[index].Board = board.raw
 
 		wait.Go(func() {
-			pages, catalogError := client.fetchCatalog(ctx, board.id)
+			pages, catalogError := client.fetchCatalog(ctx, lineageID, board.id)
 			if catalogError != nil {
-				failures[index] = catalogError
+				catalogErrors[index] = catalogError
 
 				return
 			}
@@ -180,30 +208,43 @@ func (client *Client) Observe(ctx context.Context) (snapshot.Boards, error) {
 		return snapshot.Boards{}, cancellation
 	}
 
-	for index, failure := range failures {
+	for index, failure := range catalogErrors {
 		if failure == nil {
 			continue
 		}
 
 		items[index].Catalog = &snapshot.Catalog{State: snapshot.StateFailed}
 
-		client.logFailure(ctx, catalogResource, failure)
+		failures.add(catalogResource, failure)
 	}
 
 	jobs := collectThreadJobs(boards, items)
-	client.acquireThreads(ctx, jobs)
+	client.warnThreadCapacity(ctx, lineageID, jobs)
+	client.acquireThreads(ctx, lineageID, jobs)
 
 	cancellation = externalCancellation(ctx)
 	if cancellation != nil {
 		return snapshot.Boards{}, cancellation
 	}
 
-	client.applyThreadResults(ctx, jobs)
+	client.applyThreadResults(jobs, failures)
 
 	return snapshot.Boards{State: snapshot.StatePresent, Items: &items}, nil
 }
 
-func (client *Client) applyThreadResults(ctx context.Context, jobs []threadJob) {
+func validateObservation(ctx context.Context, lineageID string) error {
+	if _, ok := ctx.Deadline(); !ok {
+		return ErrLineageDeadlineRequired
+	}
+
+	if !snapshot.ValidLineageID(lineageID) {
+		return ErrLineageIDRequired
+	}
+
+	return nil
+}
+
+func (client *Client) applyThreadResults(jobs []threadJob, failures *failureSummary) {
 	unfinished := 0
 
 	for index := range jobs {
@@ -221,17 +262,10 @@ func (client *Client) applyThreadResults(ctx context.Context, jobs []threadJob) 
 			continue
 		}
 
-		client.logFailure(ctx, threadResource, job.err)
+		failures.add(threadResource, job.err)
 	}
 
-	if unfinished > 0 {
-		client.logger.ErrorContext(ctx, "thread acquisition unfinished",
-			slog.String("resource.type", threadResource),
-			slog.Int("resource.failed.count", unfinished),
-			slog.String("error.type", errorDeadline),
-			slog.String("error.cause.type", causeLineageDeadline),
-		)
-	}
+	failures.addCount(threadResource, lineageDeadlineFailure(stageQueue), unfinished)
 }
 
 func collectThreadJobs(boards []observedBoard, items []snapshot.BoardItem) []threadJob {
@@ -251,7 +285,7 @@ func collectThreadJobs(boards []observedBoard, items []snapshot.BoardItem) []thr
 				job := threadJob{board: boards[boardIndex].id, number: number, entry: entry}
 
 				if err != nil {
-					job.err = &requestError{kind: errorInvalid, cause: err}
+					job.err = &requestError{kind: errorInvalid, cause: err, stage: stageDecode}
 				}
 
 				jobs = append(jobs, job)
@@ -262,7 +296,7 @@ func collectThreadJobs(boards []observedBoard, items []snapshot.BoardItem) []thr
 	return jobs
 }
 
-func (client *Client) acquireThreads(ctx context.Context, jobs []threadJob) {
+func (client *Client) acquireThreads(ctx context.Context, lineageID string, jobs []threadJob) {
 	workerCount := min(client.policy.MaxConcurrency, len(jobs))
 	if workerCount == 0 {
 		return
@@ -279,7 +313,7 @@ func (client *Client) acquireThreads(ctx context.Context, jobs []threadJob) {
 					return
 				}
 
-				job.thread, job.err = client.fetchThread(ctx, job.board, job.number)
+				job.thread, job.err = client.fetchThread(ctx, lineageID, job.board, job.number)
 			}
 		})
 	}
@@ -301,11 +335,57 @@ dispatch:
 	workers.Wait()
 }
 
-func (client *Client) logFailure(ctx context.Context, resource string, err error) {
-	client.logger.ErrorContext(ctx, "upstream acquisition failed",
-		slog.String("resource.type", resource),
-		slog.String("error.type", errorType(err)),
-		slog.String("error.cause.type", requestErrorCauseType(err)),
+func (client *Client) warnThreadCapacity(ctx context.Context, lineageID string, jobs []threadJob) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return
+	}
+
+	queued := 0
+
+	for index := range jobs {
+		if jobs[index].err == nil {
+			queued++
+		}
+	}
+
+	if queued == 0 {
+		return
+	}
+
+	select {
+	case <-client.rateGate:
+	case <-ctx.Done():
+		return
+	}
+
+	now := time.Now()
+	nextStart := client.lastStart.Add(client.policy.RateInterval)
+
+	if nextStart.Before(now) {
+		nextStart = now
+	}
+
+	client.rateGate <- struct{}{}
+
+	remaining := max(deadline.Sub(now), 0)
+
+	capacity := int64(0)
+
+	if nextStart.Before(deadline) {
+		capacity = 1 + int64((deadline.Sub(nextStart)-1)/client.policy.RateInterval)
+	}
+
+	if int64(queued) <= capacity {
+		return
+	}
+
+	client.logger.WarnContext(ctx, "thread acquisition exceeds remaining rate capacity",
+		slog.String("lineage.id", lineageID),
+		slog.String("resource.type", threadResource),
+		slog.Int("resource.queued.count", queued),
+		slog.Int64("resource.rate_capacity.count", capacity),
+		slog.Duration("lineage.deadline.remaining", remaining),
 	)
 }
 

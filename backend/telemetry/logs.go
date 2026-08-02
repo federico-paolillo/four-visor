@@ -7,13 +7,15 @@ import (
 )
 
 var retainedLogMessages = map[string]struct{}{
-	"synchronization started":        {},
-	"outbound acquisition completed": {},
-	"lineage activated":              {},
-	"previous lineage evicted":       {},
-	"synchronization completed":      {},
-	"oversized thread detected":      {},
-	"synchronization tick skipped":   {},
+	"synchronization started":                            {},
+	"outbound acquisition completed":                     {},
+	"lineage activated":                                  {},
+	"previous lineage evicted":                           {},
+	"synchronization completed":                          {},
+	"oversized thread detected":                          {},
+	"synchronization tick skipped":                       {},
+	"effective backend policy configured":                {},
+	"thread acquisition exceeds remaining rate capacity": {},
 }
 
 var retainedLogAttributes = map[string]struct{}{
@@ -33,6 +35,24 @@ var retainedLogAttributes = map[string]struct{}{
 	"posts.limit":                   {},
 	errorTypeKey:                    {},
 	"error.cause.type":              {},
+	"error.detail":                  {},
+	"failure.stage":                 {},
+	"failure.count":                 {},
+	"http.response.status_code":     {},
+	"retry.attempt":                 {},
+	"retry.exhausted":               {},
+	"publication.stage":             {},
+	"snapshot.component":            {},
+	"resource.queued.count":         {},
+	"resource.rate_capacity.count":  {},
+	"lineage.deadline.remaining":    {},
+	"acquisition.rate_interval":     {},
+	"acquisition.max_concurrency":   {},
+	"acquisition.request_timeout":   {},
+	"acquisition.max_retries":       {},
+	"acquisition.retry_backoff":     {},
+	"synchronization.interval":      {},
+	"lineage.deadline":              {},
 }
 
 // otlpLogHandler applies the application log policy only to the OTLP branch.

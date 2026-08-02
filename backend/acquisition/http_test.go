@@ -23,6 +23,8 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
+const testLineageID = "01J1YQ7Y0M4S6R8T2V3W5X7Y9Z"
+
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (roundTrip roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -49,7 +51,7 @@ func TestRetryBackoffAndRetryAfter(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 		defer cancel()
 
-		if _, err := client.fetchBoards(ctx); err != nil {
+		if _, err := client.fetchBoards(ctx, testLineageID); err != nil {
 			t.Fatalf("fetchBoards() error = %v", err)
 		}
 		if len(starts) != 3 {
@@ -100,7 +102,7 @@ func TestOneClientSharesRateAndConcurrencyAcrossObserveCalls(t *testing.T) {
 		var observations sync.WaitGroup
 		for range 2 {
 			observations.Go(func() {
-				_, err := client.Observe(ctx)
+				_, err := client.Observe(ctx, testLineageID)
 				results <- err
 			})
 		}
@@ -145,7 +147,7 @@ func TestTimeoutDeadlineAndExternalCancellation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 			defer cancel()
 
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			if err != nil || boards.State != snapshot.StateFailed {
 				t.Fatalf("Observe() = %#v, %v; want failed technical degradation", boards, err)
 			}
@@ -160,7 +162,7 @@ func TestTimeoutDeadlineAndExternalCancellation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			if err != nil || boards.State != snapshot.StateFailed {
 				t.Fatalf("Observe() = %#v, %v; want failed deadline degradation", boards, err)
 			}
@@ -183,7 +185,7 @@ func TestTimeoutDeadlineAndExternalCancellation(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
 			defer cancel()
 
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			if err != nil || boards.State != snapshot.StatePresent {
 				t.Fatalf("Observe() = %#v, %v; want present boards", boards, err)
 			}
@@ -217,7 +219,7 @@ func TestTimeoutDeadlineAndExternalCancellation(t *testing.T) {
 		}
 		resultChannel := make(chan result, 1)
 		go func() {
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			resultChannel <- result{boards: boards, err: err}
 		}()
 
@@ -308,7 +310,7 @@ func TestBoundedThreadWorkersPreserveCatalogOrder(t *testing.T) {
 		}
 		results := make(chan result, 1)
 		go func() {
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			results <- result{boards: boards, err: err}
 		}()
 
@@ -364,7 +366,7 @@ func TestThreadDeadlineFailsInFlightAndUndispatched(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), 2500*time.Millisecond)
 		defer cancel()
 
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if err != nil || boards.FailedResourceCount() != 3 || threadCalls.Load() != 1 {
 			t.Fatalf("Observe() = %#v, %v failures=%d calls=%d",
 				boards, err, boards.FailedResourceCount(), threadCalls.Load())
@@ -410,7 +412,7 @@ func TestExternalCancellationAbortsThreadAcquisition(t *testing.T) {
 		}
 		results := make(chan result, 1)
 		go func() {
-			boards, err := client.Observe(ctx)
+			boards, err := client.Observe(ctx, testLineageID)
 			results <- result{boards: boards, err: err}
 		}()
 
@@ -440,7 +442,7 @@ func TestPreCanceledContextDoesNotEnterTransport(t *testing.T) {
 	cancel(cause)
 
 	for range 64 {
-		boards, err := client.Observe(ctx)
+		boards, err := client.Observe(ctx, testLineageID)
 		if !errors.Is(err, cause) || boards.State != "" || boards.Items != nil {
 			t.Fatalf("Observe() = %#v, %v; want no result and preserved cancellation", boards, err)
 		}
@@ -462,8 +464,9 @@ func TestInvalidUpstreamResponseIsNotRetriedAndPreservesCause(t *testing.T) {
 		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 		defer cancel()
 
-		_, err := client.fetchBoards(ctx)
-		if err == nil || errorType(err) != errorInvalid || calls.Load() != 1 {
+		_, err := client.fetchBoards(ctx, testLineageID)
+		var failure *requestError
+		if !errors.As(err, &failure) || failure.kind != errorInvalid || calls.Load() != 1 {
 			t.Fatalf("fetchBoards() error = %v calls=%d, want one invalid-response attempt", err, calls.Load())
 		}
 		if !errors.Is(err, io.ErrUnexpectedEOF) {

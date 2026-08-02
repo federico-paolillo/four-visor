@@ -34,7 +34,7 @@ var (
 )
 
 type schedulerDependencies struct {
-	observe        func(context.Context) (snapshot.Boards, error)
+	observe        func(context.Context, string) (snapshot.Boards, error)
 	publish        func(context.Context, snapshot.Snapshot, time.Duration) error
 	logger         *slog.Logger
 	tracer         trace.Tracer
@@ -44,13 +44,27 @@ type schedulerDependencies struct {
 	deadline       time.Duration
 }
 
+type stageError struct {
+	stage     string
+	errorType string
+	cause     error
+}
+
+func (failure *stageError) Error() string {
+	return "lineage " + failure.stage + " " + failure.errorType
+}
+
+func (failure *stageError) Unwrap() error {
+	return failure.cause
+}
+
 // Scheduler owns the instance-local cadence and one active lineage construction.
 type Scheduler struct {
 	interval         time.Duration
 	tolerance        int
 	jitter           time.Duration
 	deadline         time.Duration
-	observe          func(context.Context) (snapshot.Boards, error)
+	observe          func(context.Context, string) (snapshot.Boards, error)
 	publish          func(context.Context, snapshot.Snapshot, time.Duration) error
 	logger           *slog.Logger
 	tracer           trace.Tracer
@@ -190,7 +204,7 @@ func (scheduler *Scheduler) synchronize(parent context.Context) {
 
 	value, counts, err := scheduler.construct(ctx, root, startedAt)
 	if err != nil {
-		scheduler.fail(ctx, root, synchronizationErrorType(err), value.LineageID)
+		scheduler.fail(ctx, root, err, value.LineageID)
 
 		return
 	}
@@ -200,7 +214,7 @@ func (scheduler *Scheduler) synchronize(parent context.Context) {
 	var cleanupError *lineage.CleanupError
 
 	if publishError != nil && !errors.As(publishError, &cleanupError) {
-		markSynchronizationFailed(root, synchronizationErrorType(publishError))
+		markSynchronizationFailed(root, "publication", synchronizationErrorType(publishError), publishError)
 
 		return
 	}
@@ -239,7 +253,7 @@ func (scheduler *Scheduler) construct(
 		LineageID:     lineageID,
 		ObservedAt:    startedAt.Format(time.RFC3339Nano),
 	}
-	boards, err := scheduler.acquire(ctx)
+	boards, err := scheduler.acquire(ctx, lineageID)
 
 	contextError := context.Cause(ctx)
 	if contextError != nil {
@@ -333,16 +347,16 @@ func (scheduler *Scheduler) complete(
 	)
 }
 
-func (scheduler *Scheduler) acquire(ctx context.Context) (snapshot.Boards, error) {
+func (scheduler *Scheduler) acquire(ctx context.Context, lineageID string) (snapshot.Boards, error) {
 	acquisitionCtx, acquisitionSpan := scheduler.tracer.Start(ctx, "lineage.acquire")
 
 	acquisitionCtx, cancel := context.WithTimeout(acquisitionCtx, scheduler.deadline)
 	defer cancel()
 	defer acquisitionSpan.End()
 
-	boards, err := scheduler.observe(acquisitionCtx)
+	boards, err := scheduler.observe(acquisitionCtx, lineageID)
 	if err != nil {
-		finishStageSpan(acquisitionSpan, "acquisition_failed")
+		finishStageSpan(acquisitionSpan, "acquisition", synchronizationErrorType(err), err)
 	}
 
 	return boards, err
@@ -354,14 +368,15 @@ func (scheduler *Scheduler) publishLineage(ctx context.Context, value snapshot.S
 
 	err := scheduler.publish(publicationCtx, value, scheduler.interval)
 	if err != nil {
-		finishStageSpan(publicationSpan, "publication_failed")
+		finishStageSpan(publicationSpan, "publication", synchronizationErrorType(err), err)
 	}
 
 	return err
 }
 
-func (scheduler *Scheduler) fail(ctx context.Context, root trace.Span, errorType, lineageID string) {
-	markSynchronizationFailed(root, errorType)
+func (scheduler *Scheduler) fail(ctx context.Context, root trace.Span, err error, lineageID string) {
+	errorType := synchronizationErrorType(err)
+	markSynchronizationFailed(root, "construction", errorType, err)
 
 	attributes := []any{slog.String("error.type", errorType)}
 	if snapshot.ValidLineageID(lineageID) {
@@ -371,14 +386,16 @@ func (scheduler *Scheduler) fail(ctx context.Context, root trace.Span, errorType
 	scheduler.logger.ErrorContext(ctx, "synchronization failed", attributes...)
 }
 
-func markSynchronizationFailed(root trace.Span, errorType string) {
+func markSynchronizationFailed(root trace.Span, stage, errorType string, err error) {
 	root.SetAttributes(attribute.String("error.type", errorType))
-	markRootError(root, "lineage synchronization failed")
+	root.RecordError(&stageError{stage: stage, errorType: errorType, cause: err})
+	root.SetStatus(codes.Error, "lineage synchronization failed")
 }
 
-func finishStageSpan(span trace.Span, description string) {
-	span.RecordError(errors.New(description))
-	span.SetStatus(codes.Error, description)
+func finishStageSpan(span trace.Span, stage, errorType string, err error) {
+	span.SetAttributes(attribute.String("error.type", errorType))
+	span.RecordError(&stageError{stage: stage, errorType: errorType, cause: err})
+	span.SetStatus(codes.Error, "lineage "+stage+" failed")
 }
 
 func markRootError(span trace.Span, description string) {

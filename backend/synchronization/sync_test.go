@@ -27,9 +27,15 @@ import (
 func TestSynchronizeAssignsFreshULIDAndOneStartTime(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var values []snapshot.Snapshot
+		var observedLineages []string
 		entropy := append(make([]byte, 10), append(make([]byte, 9), 1)...)
 		scheduler := unitScheduler(t, schedulerOptions{
 			lineageEntropy: bytes.NewReader(entropy),
+			observe: func(_ context.Context, lineageID string) (snapshot.Boards, error) {
+				observedLineages = append(observedLineages, lineageID)
+
+				return boardsWithFailures(0), nil
+			},
 			publish: func(_ context.Context, value snapshot.Snapshot, interval time.Duration) error {
 				if interval != time.Hour {
 					t.Fatalf("publication interval = %s, want 1h", interval)
@@ -47,6 +53,10 @@ func TestSynchronizeAssignsFreshULIDAndOneStartTime(t *testing.T) {
 		scheduler.synchronize(t.Context())
 		if len(values) != 2 || values[0].LineageID == values[1].LineageID {
 			t.Fatalf("lineage IDs = %q, %q", values[0].LineageID, values[1].LineageID)
+		}
+		if len(observedLineages) != 2 || observedLineages[0] != values[0].LineageID ||
+			observedLineages[1] != values[1].LineageID {
+			t.Fatalf("observed lineages = %v, published = [%s %s]", observedLineages, values[0].LineageID, values[1].LineageID)
 		}
 		for _, value := range values {
 			identifier, err := ulid.ParseStrict(value.LineageID)
@@ -70,7 +80,7 @@ func TestAcquisitionDeadlineFinalizesButExternalCancellationAborts(t *testing.T)
 			published := false
 			scheduler := unitScheduler(t, schedulerOptions{
 				deadline: 10 * time.Second,
-				observe: func(ctx context.Context) (snapshot.Boards, error) {
+				observe: func(ctx context.Context, _ string) (snapshot.Boards, error) {
 					<-ctx.Done()
 					if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 						t.Fatalf("acquisition context error = %v", ctx.Err())
@@ -104,7 +114,7 @@ func TestAcquisitionDeadlineFinalizesButExternalCancellationAborts(t *testing.T)
 		cancel(cause)
 		scheduler := harness.scheduler(t, schedulerOptions{
 			logs: &logs,
-			observe: func(ctx context.Context) (snapshot.Boards, error) {
+			observe: func(ctx context.Context, _ string) (snapshot.Boards, error) {
 				return snapshot.Boards{}, context.Cause(ctx)
 			},
 			publish: func(context.Context, snapshot.Snapshot, time.Duration) error {
@@ -129,7 +139,7 @@ func TestAcquisitionDeadlineFinalizesButExternalCancellationAborts(t *testing.T)
 		var logs bytes.Buffer
 		scheduler := unitScheduler(t, schedulerOptions{
 			logs: &logs,
-			observe: func(context.Context) (snapshot.Boards, error) {
+			observe: func(context.Context, string) (snapshot.Boards, error) {
 				return snapshot.Boards{}, errors.New("acquisition unavailable")
 			},
 		})
@@ -163,7 +173,7 @@ func TestSynchronizationOutcomeTelemetry(t *testing.T) {
 				var logs bytes.Buffer
 				scheduler := harness.scheduler(t, schedulerOptions{
 					logs:    &logs,
-					observe: func(context.Context) (snapshot.Boards, error) { return boardsWithFailures(test.failures), nil },
+					observe: func(context.Context, string) (snapshot.Boards, error) { return boardsWithFailures(test.failures), nil },
 				})
 
 				harness.assertActiveAgeAbsent(t)
@@ -187,7 +197,7 @@ func TestSynchronizationExporterFailureDoesNotChangeActivation(t *testing.T) {
 	t.Cleanup(func() { _ = provider.Shutdown(t.Context()) })
 	published := false
 	scheduler, err := newScheduler(time.Hour, 10, schedulerDependencies{
-		observe: func(context.Context) (snapshot.Boards, error) {
+		observe: func(context.Context, string) (snapshot.Boards, error) {
 			return boardsWithFailures(0), nil
 		},
 		publish: func(context.Context, snapshot.Snapshot, time.Duration) error {
@@ -270,7 +280,7 @@ func TestPublicationFailureAndCleanupErrorHaveDistinctCommitSemantics(t *testing
 		var logs bytes.Buffer
 		scheduler := harness.scheduler(t, schedulerOptions{
 			logs:    &logs,
-			observe: func(context.Context) (snapshot.Boards, error) { return boardsWithFailures(11), nil },
+			observe: func(context.Context, string) (snapshot.Boards, error) { return boardsWithFailures(11), nil },
 			publish: func(context.Context, snapshot.Snapshot, time.Duration) error {
 				return new(lineage.CleanupError)
 			},
@@ -299,7 +309,7 @@ func TestPublicationFailureAndCleanupErrorHaveDistinctCommitSemantics(t *testing
 
 type schedulerOptions struct {
 	logs           io.Writer
-	observe        func(context.Context) (snapshot.Boards, error)
+	observe        func(context.Context, string) (snapshot.Boards, error)
 	publish        func(context.Context, snapshot.Snapshot, time.Duration) error
 	lineageEntropy io.Reader
 	deadline       time.Duration
@@ -335,7 +345,7 @@ func (harness *telemetryHarness) scheduler(t *testing.T, options schedulerOption
 		options.logs = io.Discard
 	}
 	if options.observe == nil {
-		options.observe = func(context.Context) (snapshot.Boards, error) { return boardsWithFailures(0), nil }
+		options.observe = func(context.Context, string) (snapshot.Boards, error) { return boardsWithFailures(0), nil }
 	}
 	if options.publish == nil {
 		options.publish = func(context.Context, snapshot.Snapshot, time.Duration) error { return nil }

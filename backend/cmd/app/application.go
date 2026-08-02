@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 
@@ -21,15 +22,7 @@ type application struct {
 }
 
 func newApplication(cfg config.Config, providers *telemetry.Providers) (application, error) {
-	cache := health.NewMemcached(cfg.MemcachedAddress)
-	dns := health.NewDNS(cfg.DNSName, net.DefaultResolver)
-	healthHandler := health.NewHandler(
-		cfg.HealthTimeout,
-		providers.Slog,
-		providers.Tracer.Tracer("four-visor/health"),
-		cache,
-		dns,
-	)
+	healthHandler := newHealthHandler(cfg, providers)
 
 	lineageTracer := providers.Tracer.Tracer("four-visor/lineage")
 	lineageMeter := providers.Meter.Meter("four-visor/lineage")
@@ -80,6 +73,8 @@ func newApplication(cfg config.Config, providers *telemetry.Providers) (applicat
 		return application{}, fmt.Errorf("creating synchronization scheduler: %w", err)
 	}
 
+	logEffectivePolicy(providers.Slog, cfg)
+
 	mux := http.NewServeMux()
 	mux.Handle("/health", healthHandler)
 	mux.Handle("/snapshot", snapshotHandler)
@@ -90,4 +85,30 @@ func newApplication(cfg config.Config, providers *telemetry.Providers) (applicat
 	}
 
 	return application{handler: handler, scheduler: scheduler}, nil
+}
+
+func newHealthHandler(cfg config.Config, providers *telemetry.Providers) http.Handler {
+	cache := health.NewMemcached(cfg.MemcachedAddress)
+	dns := health.NewDNS(cfg.DNSName, net.DefaultResolver)
+
+	return health.NewHandler(
+		cfg.HealthTimeout,
+		providers.Slog,
+		providers.Tracer.Tracer("four-visor/health"),
+		cache,
+		dns,
+	)
+}
+
+func logEffectivePolicy(logger *slog.Logger, cfg config.Config) {
+	logger.Info("effective backend policy configured",
+		slog.Duration("acquisition.rate_interval", cfg.Acquisition.RateInterval),
+		slog.Int("acquisition.max_concurrency", cfg.Acquisition.MaxConcurrency),
+		slog.Duration("acquisition.request_timeout", cfg.Acquisition.RequestTimeout),
+		slog.Int("acquisition.max_retries", cfg.Acquisition.MaxRetries),
+		slog.Duration("acquisition.retry_backoff", cfg.Acquisition.RetryBackoff),
+		slog.Duration("synchronization.interval", cfg.Synchronization.Interval),
+		slog.Duration("lineage.deadline", synchronization.LineageDeadline),
+		slog.Int("resource.failed.tolerance", cfg.Synchronization.FailedResourceTolerance),
+	)
 }

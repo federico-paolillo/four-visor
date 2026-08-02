@@ -119,6 +119,8 @@ func TestSnapshotHandlerMapsOperationalFailuresSafely(t *testing.T) {
 		configure func(*fakeMemcache) context.Context
 		status    int
 		errorType string
+		component string
+		lineage   bool
 	}{
 		{
 			name: "missing pointer",
@@ -127,6 +129,7 @@ func TestSnapshotHandlerMapsOperationalFailuresSafely(t *testing.T) {
 			},
 			status:    http.StatusGone,
 			errorType: "cache_miss",
+			component: "pointer",
 		},
 		{
 			name: "dependency unavailable",
@@ -143,6 +146,7 @@ func TestSnapshotHandlerMapsOperationalFailuresSafely(t *testing.T) {
 			},
 			status:    http.StatusServiceUnavailable,
 			errorType: "unavailable",
+			component: "pointer",
 		},
 		{
 			name: "present corruption",
@@ -153,6 +157,47 @@ func TestSnapshotHandlerMapsOperationalFailuresSafely(t *testing.T) {
 			},
 			status:    http.StatusInternalServerError,
 			errorType: "corrupt",
+			component: "pointer",
+		},
+		{
+			name: "missing completion",
+			configure: func(cache *fakeMemcache) context.Context {
+				cache.items[activePointerKey] = &memcache.Item{Value: []byte(newLineageID)}
+
+				return t.Context()
+			},
+			status:    http.StatusGone,
+			errorType: "cache_miss",
+			component: "completion",
+			lineage:   true,
+		},
+		{
+			name: "missing block",
+			configure: func(cache *fakeMemcache) context.Context {
+				data := mustMarshalSnapshot(t, testSnapshot(newLineageID, 0))
+				seedSerializedLineage(t, cache, newLineageID, data)
+				delete(cache.items, blockKey(newLineageID, 0))
+
+				return t.Context()
+			},
+			status:    http.StatusGone,
+			errorType: "cache_miss",
+			component: "block",
+			lineage:   true,
+		},
+		{
+			name: "invalid serialization",
+			configure: func(cache *fakeMemcache) context.Context {
+				data := mustMarshalSnapshot(t, testSnapshot(newLineageID, 0))
+				seedSerializedLineage(t, cache, newLineageID, data)
+				cache.items[blockKey(newLineageID, 0)].Value[0] = '!'
+
+				return t.Context()
+			},
+			status:    http.StatusInternalServerError,
+			errorType: "corrupt",
+			component: "serialization",
+			lineage:   true,
 		},
 		{
 			name: "request canceled",
@@ -164,6 +209,7 @@ func TestSnapshotHandlerMapsOperationalFailuresSafely(t *testing.T) {
 			},
 			status:    http.StatusServiceUnavailable,
 			errorType: "canceled",
+			component: "pointer",
 		},
 		{
 			name: "request deadline",
@@ -175,6 +221,7 @@ func TestSnapshotHandlerMapsOperationalFailuresSafely(t *testing.T) {
 			},
 			status:    http.StatusServiceUnavailable,
 			errorType: "timeout",
+			component: "pointer",
 		},
 	}
 
@@ -192,8 +239,14 @@ func TestSnapshotHandlerMapsOperationalFailuresSafely(t *testing.T) {
 				t.Fatalf("status = %d, want %d", response.Code, test.status)
 			}
 			assertSnapshotHeaders(t, response, response.Body.Len())
-			if countLines(logs.String()) != 1 || !strings.Contains(logs.String(), `"error.type":"`+test.errorType+`"`) {
+			if countLines(logs.String()) != 1 ||
+				!strings.Contains(logs.String(), `"error.type":"`+test.errorType+`"`) ||
+				!strings.Contains(logs.String(), `"snapshot.component":"`+test.component+`"`) ||
+				!strings.Contains(logs.String(), `"http.response.status_code":`+strconv.Itoa(test.status)) {
 				t.Fatalf("logs = %q, want one %s failure", logs.String(), test.errorType)
+			}
+			if got := strings.Contains(logs.String(), `"lineage.id":"`+newLineageID+`"`); got != test.lineage {
+				t.Fatalf("lineage correlation present=%t, want %t: %s", got, test.lineage, logs.String())
 			}
 			for _, forbidden := range []string{secret, activePointerKey, lineageKeyPrefix, `"schemaVersion"`} {
 				if strings.Contains(response.Body.String(), forbidden) || strings.Contains(logs.String(), forbidden) {
@@ -238,6 +291,11 @@ func TestSnapshotHandlerWriteFailureIsTelemetryOnly(t *testing.T) {
 	}
 	if countLines(logs.String()) != 1 || !strings.Contains(logs.String(), `"error.type":"canceled"`) {
 		t.Fatalf("write failure logs = %q", logs.String())
+	}
+	if !strings.Contains(logs.String(), `"snapshot.component":"response"`) ||
+		!strings.Contains(logs.String(), `"http.response.status_code":200`) ||
+		!strings.Contains(logs.String(), `"lineage.id":"`+newLineageID+`"`) {
+		t.Fatalf("write failure detail logs = %q", logs.String())
 	}
 	for _, span := range exporter.GetSpans() {
 		if span.Name == "http.server" && span.Status.Code != codes.Error {

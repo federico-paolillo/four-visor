@@ -127,3 +127,30 @@ until the next scheduled synchronization rebuilds serving state. If only
 telemetry is missing, inspect the backend and Collector logs and verify the
 Grafana Cloud endpoint and credentials; telemetry loss does not change normal
 application processing.
+
+At startup, `effective backend policy configured` reports the active acquisition
+rate, concurrency, request timeout, retry policy, synchronization interval,
+lineage deadline, and failed-resource tolerance. It deliberately excludes
+addresses, endpoints, User-Agent, and commit hash.
+
+For a degraded lineage, search logs by `lineage.id`, then inspect
+`upstream acquisition failures summarized`. Each record groups terminal
+resources by `resource.type`, `failure.stage`, controlled `error.type` and
+`error.cause.type`, `http.response.status_code`, `retry.attempt`, and
+`retry.exhausted`; `failure.count` is the number in that group. A
+`thread acquisition exceeds remaining rate capacity` warning means even one
+attempt per queued thread cannot fit the remaining lineage deadline at the
+configured global rate.
+
+Publication failures add `publication.stage` and controlled `error.detail`.
+Snapshot failures add `snapshot.component` and the response status; `lineage.id`
+appears only after a valid active pointer was read. These diagnostics never
+contain board/thread identifiers, URLs, response values, cache keys, or raw
+transport/cache errors.
+
+`lineage.resource.failure.count` counts the grouped terminal acquisition
+failures with the same bounded dimensions but no lineage identifier.
+`lineage.failed_resource.count` remains the total failed wrappers in each
+activated lineage. Attribute-free `lineage.active.size` reports the last
+committed serialized snapshot size in bytes and is unchanged by failed
+publication.

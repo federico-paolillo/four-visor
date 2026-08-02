@@ -27,7 +27,7 @@ func TestStartupJitterRangeAndInstanceReuse(t *testing.T) {
 		t.Fatalf("startupJitter(maximum) = %s, %v", maximum, err)
 	}
 
-	scheduler := testScheduler(t, time.Hour, io.Discard, func(context.Context) (snapshot.Boards, error) {
+	scheduler := testScheduler(t, time.Hour, io.Discard, func(context.Context, string) (snapshot.Boards, error) {
 		return failedBoards(), nil
 	})
 	if scheduler.jitter != minimumStartupJitter {
@@ -43,7 +43,7 @@ func TestStartupJitterRangeAndInstanceReuse(t *testing.T) {
 func TestFixedCadenceStartsAfterJitter(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		starts := make(chan time.Time, 3)
-		scheduler := testScheduler(t, 10*time.Second, io.Discard, func(context.Context) (snapshot.Boards, error) {
+		scheduler := testScheduler(t, 10*time.Second, io.Discard, func(context.Context, string) (snapshot.Boards, error) {
 			starts <- time.Now()
 
 			return failedBoards(), nil
@@ -75,7 +75,7 @@ func TestActiveTicksAreSkippedWithoutCatchUp(t *testing.T) {
 		entered := make(chan time.Time, 2)
 		release := make(chan struct{})
 		var calls atomic.Int64
-		scheduler := testScheduler(t, 10*time.Second, &logs, func(ctx context.Context) (snapshot.Boards, error) {
+		scheduler := testScheduler(t, 10*time.Second, &logs, func(ctx context.Context, _ string) (snapshot.Boards, error) {
 			call := calls.Add(1)
 			entered <- time.Now()
 			if call == 1 {
@@ -121,7 +121,7 @@ func TestShutdownCancelsAndWaitsForActiveRun(t *testing.T) {
 		entered := make(chan struct{})
 		canceled := make(chan struct{})
 		release := make(chan struct{})
-		scheduler := testScheduler(t, time.Hour, io.Discard, func(ctx context.Context) (snapshot.Boards, error) {
+		scheduler := testScheduler(t, time.Hour, io.Discard, func(ctx context.Context, _ string) (snapshot.Boards, error) {
 			close(entered)
 			<-ctx.Done()
 			close(canceled)
@@ -154,7 +154,7 @@ func TestShutdownCancelsAndWaitsForActiveRun(t *testing.T) {
 func TestStaleActiveTickIsSkippedAfterCompletionWasObserved(t *testing.T) {
 	var logs bytes.Buffer
 	started := false
-	scheduler := testScheduler(t, time.Hour, &logs, func(context.Context) (snapshot.Boards, error) {
+	scheduler := testScheduler(t, time.Hour, &logs, func(context.Context, string) (snapshot.Boards, error) {
 		return failedBoards(), nil
 	})
 	completedAt := time.Now()
@@ -179,7 +179,7 @@ func testScheduler(
 	t *testing.T,
 	interval time.Duration,
 	logs io.Writer,
-	observe func(context.Context) (snapshot.Boards, error),
+	observe func(context.Context, string) (snapshot.Boards, error),
 ) *Scheduler {
 	t.Helper()
 

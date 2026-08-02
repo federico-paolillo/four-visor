@@ -1,14 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,10 +24,11 @@ func TestApplicationRegistersOnlyInternalSnapshotRoute(t *testing.T) {
 	t.Cleanup(func() { _ = tracerProvider.Shutdown(t.Context()) })
 	meterProvider := metricsdk.NewMeterProvider()
 	t.Cleanup(func() { _ = meterProvider.Shutdown(t.Context()) })
+	var logs bytes.Buffer
 	providers := &telemetry.Providers{
 		Tracer: tracerProvider,
 		Meter:  meterProvider,
-		Slog:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Slog:   slog.New(slog.NewJSONHandler(&logs, nil)),
 	}
 	application, err := newApplication(config.Config{
 		HealthTimeout:    time.Second,
@@ -47,6 +49,25 @@ func TestApplicationRegistersOnlyInternalSnapshotRoute(t *testing.T) {
 	}, providers)
 	if err != nil {
 		t.Fatalf("newApplication() error = %v", err)
+	}
+	if strings.Count(logs.String(), "effective backend policy configured") != 1 {
+		t.Fatalf("effective policy logs = %s", logs.String())
+	}
+	for _, field := range []string{
+		"acquisition.rate_interval", "acquisition.max_concurrency", "acquisition.request_timeout",
+		"acquisition.max_retries", "acquisition.retry_backoff", "synchronization.interval",
+		"lineage.deadline", "resource.failed.tolerance",
+	} {
+		if !strings.Contains(logs.String(), `"`+field+`":`) {
+			t.Errorf("effective policy omitted %q: %s", field, logs.String())
+		}
+	}
+	for _, forbidden := range []string{
+		"127.0.0.1:65198", "a.4cdn.org", "4Visor/", "0123456789abcdef",
+	} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Errorf("effective policy disclosed %q: %s", forbidden, logs.String())
+		}
 	}
 
 	response := httptest.NewRecorder()

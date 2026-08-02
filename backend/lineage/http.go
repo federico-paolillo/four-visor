@@ -74,7 +74,7 @@ func (handler *SnapshotHandler) ServeHTTP(writer http.ResponseWriter, request *h
 		return
 	}
 
-	data, err := handler.reader.read(request.Context())
+	result, err := handler.reader.readSnapshot(request.Context())
 	if err != nil {
 		handler.fail(writer, request, err)
 
@@ -83,28 +83,32 @@ func (handler *SnapshotHandler) ServeHTTP(writer http.ResponseWriter, request *h
 
 	err = snapshotContextError(request.Context())
 	if err != nil {
-		handler.fail(writer, request, err)
+		handler.fail(writer, request, wrapSnapshotFailure("response", result.lineageID, err))
 
 		return
 	}
 
-	setSnapshotHeaders(writer.Header(), len(data))
+	setSnapshotHeaders(writer.Header(), len(result.data))
 	writer.WriteHeader(http.StatusOK)
 
-	written, err := writer.Write(data)
+	written, err := writer.Write(result.data)
 
-	if err == nil && written != len(data) {
+	if err == nil && written != len(result.data) {
 		err = io.ErrShortWrite
 	}
 
 	if err != nil {
-		handler.reportFailure(request.Context(), fmt.Errorf("writing snapshot response: %w", err))
+		handler.reportFailure(
+			request.Context(),
+			wrapSnapshotFailure("response", result.lineageID, fmt.Errorf("writing snapshot response: %w", err)),
+			http.StatusOK,
+		)
 	}
 }
 
 func (handler *SnapshotHandler) fail(writer http.ResponseWriter, request *http.Request, err error) {
-	status := snapshotFailureStatus(err)
-	handler.reportFailure(request.Context(), err)
+	status := snapshotErrorStatus(err)
+	handler.reportFailure(request.Context(), err, status)
 
 	switch status {
 	case http.StatusGone:
@@ -116,17 +120,36 @@ func (handler *SnapshotHandler) fail(writer http.ResponseWriter, request *http.R
 	}
 }
 
-func (handler *SnapshotHandler) reportFailure(ctx context.Context, err error) {
+func (handler *SnapshotHandler) reportFailure(ctx context.Context, err error, status int) {
 	errorType := snapshotErrorType(err)
+	component, lineageID := snapshotErrorFields(err)
 	root := trace.SpanFromContext(ctx)
-	root.SetAttributes(attribute.String("error.type", errorType))
-	root.RecordError(errors.New("snapshot request failed"))
+	root.SetAttributes(
+		attribute.String("error.type", errorType),
+		attribute.String("snapshot.component", component),
+		attribute.Int("http.response.status_code", status),
+	)
+
+	if lineageID != "" {
+		root.SetAttributes(attribute.String("lineage.id", lineageID))
+	}
+
+	root.RecordError(err)
 	root.SetStatus(codes.Error, "snapshot request failed")
 
-	handler.logger.ErrorContext(ctx, "snapshot request failed", slog.String("error.type", errorType))
+	attributes := []any{
+		slog.String("error.type", errorType),
+		slog.String("snapshot.component", component),
+		slog.Int("http.response.status_code", status),
+	}
+	if lineageID != "" {
+		attributes = append(attributes, slog.String("lineage.id", lineageID))
+	}
+
+	handler.logger.ErrorContext(ctx, "snapshot request failed", attributes...)
 }
 
-func snapshotFailureStatus(err error) int {
+func snapshotErrorStatus(err error) int {
 	switch {
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return http.StatusServiceUnavailable

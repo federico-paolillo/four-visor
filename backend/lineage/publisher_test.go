@@ -267,6 +267,91 @@ func TestValidationFailureDoesNotMutateCache(t *testing.T) {
 	}
 }
 
+func TestPublicationDiagnosticsUseControlledClassificationAndStage(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		errorType string
+		detail    string
+	}{
+		{name: "invalid JSON", err: snapshot.ErrInvalidJSON, errorType: "snapshot_invalid_json", detail: "invalid_json"},
+		{name: "invalid contract", err: snapshot.ErrInvalidContract, errorType: "snapshot_invalid_contract", detail: "invalid_contract"},
+		{name: "unsupported version", err: snapshot.ErrUnsupportedVersion, errorType: "snapshot_unsupported_version", detail: "unsupported_version"},
+		{name: "collision", err: errLineageCollision, errorType: "conflict", detail: "lineage_collision"},
+		{name: "unknown", err: errors.New("raw-value-must-not-leak"), errorType: "failed", detail: "other"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			failure := wrapPublicationFailure(publicationStageValidation, test.err)
+			if classifyError(failure) != test.errorType || errorDetail(failure) != test.detail ||
+				publicationStage(failure) != publicationStageValidation ||
+				strings.Contains(failure.Error(), "raw-value-must-not-leak") {
+				t.Fatalf("diagnostic = %q type=%q detail=%q stage=%q",
+					failure, classifyError(failure), errorDetail(failure), publicationStage(failure))
+			}
+		})
+	}
+
+	cache := newFakeMemcache()
+	var logs bytes.Buffer
+	spanExporter := tracetest.NewInMemoryExporter()
+	tracerProvider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(spanExporter))
+	t.Cleanup(func() { _ = tracerProvider.Shutdown(t.Context()) })
+	publisher, err := newPublisher(
+		cache,
+		slog.New(slog.NewJSONHandler(&logs, nil)),
+		tracerProvider.Tracer("test/lineage"),
+		metricnoop.NewMeterProvider().Meter("test/lineage"),
+	)
+	if err != nil {
+		t.Fatalf("newPublisher() error = %v", err)
+	}
+	invalid := testSnapshot(newLineageID, 0)
+	invalid.ObservedAt = "response-value-must-not-leak"
+	if err := publisher.Publish(t.Context(), invalid, time.Hour); !errors.Is(err, snapshot.ErrInvalidContract) {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	wantDetail := "snapshot.observedAt: must be a UTC RFC 3339 timestamp"
+	if !strings.Contains(logs.String(), `"error.type":"snapshot_invalid_contract"`) ||
+		!strings.Contains(logs.String(), `"error.detail":"`+wantDetail+`"`) ||
+		!strings.Contains(logs.String(), `"publication.stage":"validation"`) ||
+		strings.Contains(logs.String(), "response-value-must-not-leak") {
+		t.Fatalf("publication logs = %s", logs.String())
+	}
+
+	for _, span := range spanExporter.GetSpans() {
+		if span.Name != "lineage.validate" {
+			continue
+		}
+		attributes := make(map[string]string, len(span.Attributes))
+		for _, item := range span.Attributes {
+			attributes[string(item.Key)] = item.Value.Emit()
+		}
+		if attributes["error.type"] != "snapshot_invalid_contract" ||
+			attributes["error.detail"] != wantDetail ||
+			attributes["publication.stage"] != publicationStageValidation {
+			t.Fatalf("validation span attributes = %#v", attributes)
+		}
+		for _, item := range span.Attributes {
+			if strings.Contains(item.Value.Emit(), invalid.ObservedAt) {
+				t.Fatalf("validation span disclosed rejected value: %#v", span.Attributes)
+			}
+		}
+		for _, event := range span.Events {
+			for _, item := range event.Attributes {
+				if strings.Contains(item.Value.Emit(), invalid.ObservedAt) {
+					t.Fatalf("validation span event disclosed rejected value: %#v", event.Attributes)
+				}
+			}
+		}
+
+		return
+	}
+
+	t.Fatal("lineage.validate span missing")
+}
+
 func TestExpiryDuringPublicationDoesNotMutateLineageKeys(t *testing.T) {
 	cache := newFakeMemcache()
 	publisher := testPublisher(t, cache)
@@ -613,6 +698,56 @@ func TestCleanupFailureKeepsNewLineageActive(t *testing.T) {
 	}
 }
 
+func TestActiveSizeGaugeFollowsPointerCommit(t *testing.T) {
+	cache := newFakeMemcache()
+	reader := metricsdk.NewManualReader()
+	meterProvider := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	t.Cleanup(func() { _ = meterProvider.Shutdown(t.Context()) })
+	publisher, err := newPublisher(
+		cache,
+		slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		tracenoop.NewTracerProvider().Tracer("test/lineage"),
+		meterProvider.Meter("test/lineage"),
+	)
+	if err != nil {
+		t.Fatalf("newPublisher() error = %v", err)
+	}
+	publisher.now = func() time.Time {
+		return time.Date(2026, time.July, 28, 12, 0, 0, 0, time.UTC)
+	}
+
+	old := testSnapshot(oldLineageID, 10)
+	publish(t, publisher, t.Context(), old)
+	assertActiveSize(t, reader, serializedSize(t, old))
+
+	cache.before = func(operation, key string) error {
+		if operation == "add" && key == blockKey(newLineageID, 0) {
+			return errInjected
+		}
+
+		return nil
+	}
+	if err := publisher.Publish(t.Context(), testSnapshot(newLineageID, 100), time.Hour); !errors.Is(err, errInjected) {
+		t.Fatalf("failed Publish() error = %v", err)
+	}
+	assertActiveSize(t, reader, serializedSize(t, old))
+
+	cache.before = func(operation, key string) error {
+		if operation == "delete" && key == blockKey(oldLineageID, 0) {
+			return errInjected
+		}
+
+		return nil
+	}
+	activated := testSnapshot(unexpectedLineageID, 200)
+	err = publisher.Publish(t.Context(), activated, time.Hour)
+	var cleanup *CleanupError
+	if !errors.As(err, &cleanup) {
+		t.Fatalf("cleanup Publish() error = %v", err)
+	}
+	assertActiveSize(t, reader, serializedSize(t, activated))
+}
+
 func TestMissingPreviousCompletionReportsCleanupAfterActivation(t *testing.T) {
 	cache := newFakeMemcache()
 	publisher := testPublisher(t, cache)
@@ -684,11 +819,20 @@ func TestPublicationTelemetryIsBoundedAndKeyFree(t *testing.T) {
 	if err := reader.Collect(t.Context(), &collected); err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
-	metricCount := 0
+	cacheMetricCount := 0
 	pointCount := uint64(0)
 	for _, scope := range collected.ScopeMetrics {
 		for _, item := range scope.Metrics {
-			metricCount++
+			if item.Name == "lineage.active.size" {
+				data, ok := item.Data.(metricdata.Gauge[int64])
+				if !ok || item.Unit != "By" || len(data.DataPoints) != 1 || data.DataPoints[0].Attributes.Len() != 0 {
+					t.Fatalf("active-size metric = %#v", item)
+				}
+
+				continue
+			}
+
+			cacheMetricCount++
 			switch data := item.Data.(type) {
 			case metricdata.Sum[int64]:
 				for _, point := range data.DataPoints {
@@ -705,9 +849,46 @@ func TestPublicationTelemetryIsBoundedAndKeyFree(t *testing.T) {
 			}
 		}
 	}
-	if metricCount != 2 || pointCount != 12 {
-		t.Fatalf("cache metrics=%d total points=%d, want 2 and 12", metricCount, pointCount)
+	if cacheMetricCount != 2 || pointCount != 12 {
+		t.Fatalf("cache metrics=%d total points=%d, want 2 and 12", cacheMetricCount, pointCount)
 	}
+}
+
+func serializedSize(t *testing.T, value snapshot.Snapshot) int64 {
+	t.Helper()
+
+	data, err := snapshot.Marshal(value)
+	if err != nil {
+		t.Fatalf("snapshot.Marshal() error = %v", err)
+	}
+
+	return int64(len(data))
+}
+
+func assertActiveSize(t *testing.T, reader *metricsdk.ManualReader, want int64) {
+	t.Helper()
+
+	var collected metricdata.ResourceMetrics
+	if err := reader.Collect(t.Context(), &collected); err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	for _, scope := range collected.ScopeMetrics {
+		for _, item := range scope.Metrics {
+			if item.Name != "lineage.active.size" {
+				continue
+			}
+
+			data, ok := item.Data.(metricdata.Gauge[int64])
+			if !ok || item.Unit != "By" || len(data.DataPoints) != 1 ||
+				data.DataPoints[0].Value != want || data.DataPoints[0].Attributes.Len() != 0 {
+				t.Fatalf("active size = %#v, want %d By without attributes", item, want)
+			}
+
+			return
+		}
+	}
+
+	t.Fatal("lineage.active.size metric missing")
 }
 
 func assertCacheAttributes(t *testing.T, attributes []attribute.KeyValue) {

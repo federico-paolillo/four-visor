@@ -28,7 +28,7 @@ func TestSnapshotReaderReturnsExactValidatedStoredBytes(t *testing.T) {
 
 	cache := newFakeMemcache()
 	seedSerializedLineage(t, cache, parsed.LineageID, data)
-	got, err := testSnapshotReader(t, cache).read(t.Context())
+	got, err := readSnapshotData(testSnapshotReader(t, cache), t.Context())
 	if err != nil {
 		t.Fatalf("snapshotReader.read() error = %v", err)
 	}
@@ -63,7 +63,7 @@ func TestSnapshotReaderReadsEveryBlockInOrder(t *testing.T) {
 		return nil
 	}
 
-	got, err := testSnapshotReader(t, cache).read(t.Context())
+	got, err := readSnapshotData(testSnapshotReader(t, cache), t.Context())
 	if err != nil {
 		t.Fatalf("snapshotReader.read() error = %v", err)
 	}
@@ -116,7 +116,7 @@ func TestSnapshotReaderClassifiesMissingComponents(t *testing.T) {
 			metadata := seedSerializedLineage(t, cache, value.LineageID, data)
 			test.remove(cache, metadata)
 
-			_, err := testSnapshotReader(t, cache).read(t.Context())
+			_, err := readSnapshotData(testSnapshotReader(t, cache), t.Context())
 			if !errors.Is(err, memcache.ErrCacheMiss) || errors.Is(err, errCorruptSnapshot) {
 				t.Fatalf("snapshotReader.read() error = %v, want cache miss", err)
 			}
@@ -199,7 +199,7 @@ func TestSnapshotReaderRejectsPresentCorruption(t *testing.T) {
 				test.mutate(cache, metadata)
 			}
 
-			_, err := testSnapshotReader(t, cache).read(t.Context())
+			_, err := readSnapshotData(testSnapshotReader(t, cache), t.Context())
 			if !errors.Is(err, errCorruptSnapshot) || errors.Is(err, memcache.ErrCacheMiss) {
 				t.Fatalf("snapshotReader.read() error = %v, want corruption", err)
 			}
@@ -226,7 +226,7 @@ func TestSnapshotReaderCancellationStopsSequentialWork(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
 
-		_, err := testSnapshotReader(t, cache).read(ctx)
+		_, err := readSnapshotData(testSnapshotReader(t, cache), ctx)
 		if !errors.Is(err, context.Canceled) || calls.Load() != 0 {
 			t.Fatalf("read error=%v calls=%d, want cancellation before cache", err, calls.Load())
 		}
@@ -248,7 +248,7 @@ func TestSnapshotReaderCancellationStopsSequentialWork(t *testing.T) {
 			return nil
 		}
 
-		_, err := testSnapshotReader(t, cache).read(ctx)
+		_, err := readSnapshotData(testSnapshotReader(t, cache), ctx)
 		want := []string{activePointerKey, completionKey(value.LineageID), blockKey(value.LineageID, 0)}
 		if !errors.Is(err, context.Canceled) || !slices.Equal(keys, want) {
 			t.Fatalf("read error=%v keys=%v, want canceled after %v", err, keys, want)
@@ -288,7 +288,7 @@ func TestSnapshotReaderPinsInitialPointer(t *testing.T) {
 			return nil
 		}
 
-		got, err := testSnapshotReader(t, cache).read(t.Context())
+		got, err := readSnapshotData(testSnapshotReader(t, cache), t.Context())
 		if err != nil || !bytes.Equal(got, oldData) || pointerReads != 1 {
 			t.Fatalf("read bytes=%d error=%v pointerReads=%d", len(got), err, pointerReads)
 		}
@@ -308,7 +308,7 @@ func TestSnapshotReaderPinsInitialPointer(t *testing.T) {
 			return nil
 		}
 
-		_, err := testSnapshotReader(t, cache).read(t.Context())
+		_, err := readSnapshotData(testSnapshotReader(t, cache), t.Context())
 		if !errors.Is(err, memcache.ErrCacheMiss) || pointerReads != 1 {
 			t.Fatalf("read error=%v pointerReads=%d, want one pinned miss", err, pointerReads)
 		}
@@ -350,6 +350,12 @@ func testSnapshotReader(t *testing.T, cache cacheClient) *snapshotReader {
 		cache:  instrumented,
 		tracer: tracenoop.NewTracerProvider().Tracer("test/reader"),
 	}
+}
+
+func readSnapshotData(reader *snapshotReader, ctx context.Context) ([]byte, error) {
+	result, err := reader.readSnapshot(ctx)
+
+	return result.data, err
 }
 
 func countLines(value string) int {
