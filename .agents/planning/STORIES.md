@@ -191,7 +191,7 @@ The Reader gets the first 250 posts exactly as observed, with oversized, failed,
 - Fetch the thread belonging to each of the first 250 catalog summaries through the shared outbound limiter and retry policy.
 - Preserve every returned post object, original post HTML, media reference, and post order unchanged.
 - Store zero through 250 posts as `present`; truncate more than 250 to the first 250 and mark the resource `oversize`.
-- Mark terminal/exhausted failures and unfinished resources at the 30-minute lineage deadline as `failed` without a failure-detail payload.
+- Mark terminal/exhausted failures and unfinished resources at the configured lineage deadline as `failed` without a failure-detail payload.
 - Stop scheduling or continuing unfinished acquisition after deadline/cancellation and propagate cancellation through workers.
 - Record oversize detection and errors as meaningful logs and child spans; expose failed-resource counts without high-cardinality labels.
 
@@ -352,8 +352,8 @@ The Reader receives regularly refreshed snapshots even when some upstream resour
 
 **Scope**
 
-- Run one synchronization at a time, defaulting to hourly, after a stable instance-local startup jitter between 5 and 60 seconds.
-- At construction start, create a new ULID and capture `observedAt` as UTC RFC 3339; enforce the 30-minute lineage deadline.
+- Run one synchronization at a time, defaulting to every four hours, after a stable instance-local startup jitter between 5 and 60 seconds.
+- At construction start, create a new ULID and capture `observedAt` as UTC RFC 3339; enforce the configured four-hour lineage deadline.
 - Acquire boards, catalogs, and threads from scratch, validate the final contract, publish atomically, and evict the prior lineage only after success.
 - Activate every successfully constructed/published lineage regardless of failed-resource count, including total 4chan outage represented by `boards.state = failed`.
 - Preserve the active lineage for construction, validation, cache-write, publication, and cancellation failures.
@@ -387,8 +387,8 @@ The Reader receives regularly refreshed snapshots even when some upstream resour
 
 **Objective acceptance criteria**
 
-1. The default schedule is hourly, its initial 5–60-second offset is stable for one backend instance, and a tick during an active run is skipped without overlap, queueing, or cancellation; the next ordinary tick remains the next opportunity.
-2. Each run uses a new valid ULID and one start-time UTC `observedAt`, has a hard 30-minute deadline, and cannot consume prior-lineage resources.
+1. The default schedule is every four hours, its initial 5–60-second offset is stable for one backend instance, and a tick during an active run is skipped without overlap, queueing, or cancellation; the next ordinary tick remains the next opportunity.
+2. Each run uses a new valid ULID and one start-time UTC `observedAt`, has a configurable hard deadline that defaults to four hours, and cannot consume prior-lineage resources.
 3. Successful construction/publication activates the new lineage and evicts the old; all listed non-resource failures preserve the old active pointer.
 4. Upstream resource failures, including total board-list failure, can produce and activate a contract-valid degraded lineage.
 5. Crossing the configured tolerance changes telemetry only: activation still occurs, the root span becomes error, a prominent structured log is emitted, and the full trace is eligible for failed-trace retention.

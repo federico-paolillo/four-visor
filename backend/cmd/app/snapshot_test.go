@@ -20,10 +20,16 @@ func (roundTrip snapshotRoundTripFunc) RoundTrip(request *http.Request) (*http.R
 
 func TestExecuteSnapshotWritesValidJSON(t *testing.T) {
 	t.Setenv("FOURVISOR_COMMIT_HASH", "0123456789abcdef0123456789abcdef01234567")
+	t.Setenv("FOURVISOR_ACQUISITION_DEADLINE", "2h")
+	t.Setenv("FOURVISOR_ACQUISITION_REQUEST_TIMEOUT", "3h")
 	path := filepath.Join(t.TempDir(), "snapshot.json")
 	client := &http.Client{Transport: snapshotRoundTripFunc(func(request *http.Request) (*http.Response, error) {
 		if request.Method != http.MethodGet || request.URL.String() != "https://a.4cdn.org/boards.json" {
 			t.Fatalf("snapshot request = %s %s", request.Method, request.URL)
+		}
+		deadline, ok := request.Context().Deadline()
+		if remaining := time.Until(deadline); !ok || remaining < 119*time.Minute || remaining > 2*time.Hour {
+			t.Fatalf("snapshot request deadline remaining = %s, present = %t", remaining, ok)
 		}
 
 		return &http.Response{

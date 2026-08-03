@@ -3,7 +3,7 @@
 ## Context
 
 The scheduler follows a configured fixed interval after a stable startup jitter,
-and a lineage build can run for up to thirty minutes. The backend owns only one
+and a lineage build runs within a configured global deadline. The backend owns only one
 lineage under construction. A short configured interval or delayed build can
 therefore cause a new tick while work is active. The seed excludes distributed
 coordination and repair queues but does not say whether the local tick queues,
@@ -46,8 +46,8 @@ subsystem.
 - At most one acquisition tree consumes resources or publishes cache data.
 - No queue, coordinator, generation race, or cancellation handoff is needed.
 - The current active lineage remains served throughout a long build.
-- Default settings normally avoid the edge case because the one-hour interval
-  exceeds the thirty-minute deadline.
+- The four-hour synchronization interval matches the four-hour acquisition
+  deadline by default, so a delayed tick may still be skipped without overlap.
 
 ### Negative
 

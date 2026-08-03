@@ -40,6 +40,7 @@ func TestApplicationRegistersOnlyInternalSnapshotRoute(t *testing.T) {
 			RequestTimeout: time.Second,
 			MaxRetries:     0,
 			RetryBackoff:   time.Second,
+			Deadline:       2 * time.Hour,
 			UserAgent:      "4Visor/0123456789abcdef0123456789abcdef01234567",
 		},
 		Synchronization: config.Synchronization{
@@ -52,6 +53,9 @@ func TestApplicationRegistersOnlyInternalSnapshotRoute(t *testing.T) {
 	}
 	if strings.Count(logs.String(), "effective backend policy configured") != 1 {
 		t.Fatalf("effective policy logs = %s", logs.String())
+	}
+	if !strings.Contains(logs.String(), `"lineage.deadline":7200000000000`) {
+		t.Fatalf("effective policy deadline = %s", logs.String())
 	}
 	for _, field := range []string{
 		"acquisition.rate_interval", "acquisition.max_concurrency", "acquisition.request_timeout",

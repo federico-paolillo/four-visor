@@ -62,6 +62,7 @@ func newApplication(cfg config.Config, providers *telemetry.Providers) (applicat
 
 	scheduler, err := synchronization.New(
 		cfg.Synchronization.Interval,
+		cfg.Acquisition.Deadline,
 		cfg.Synchronization.FailedResourceTolerance,
 		acquisitionClient,
 		publisher,
@@ -107,8 +108,8 @@ func logEffectivePolicy(logger *slog.Logger, cfg config.Config) {
 		slog.Duration("acquisition.request_timeout", cfg.Acquisition.RequestTimeout),
 		slog.Int("acquisition.max_retries", cfg.Acquisition.MaxRetries),
 		slog.Duration("acquisition.retry_backoff", cfg.Acquisition.RetryBackoff),
+		slog.Duration("lineage.deadline", cfg.Acquisition.Deadline),
 		slog.Duration("synchronization.interval", cfg.Synchronization.Interval),
-		slog.Duration("lineage.deadline", synchronization.LineageDeadline),
 		slog.Int("resource.failed.tolerance", cfg.Synchronization.FailedResourceTolerance),
 	)
 }

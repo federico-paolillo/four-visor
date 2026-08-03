@@ -33,7 +33,7 @@ The Operator can correlate a degraded lineage by ULID, distinguish where it fail
 
 ## Traceability
 
-- `High-Level Architecture / Upstream acquisition` and `Operational Flows / Retry behavior`: bounded global rate, retries, and the thirty-minute lineage deadline.
+- `High-Level Architecture / Upstream acquisition` and `Operational Flows / Retry behavior`: bounded global rate, retries, and the configured lineage deadline.
 - `Operational Flows / Lineage construction and activation`: atomic pointer replacement and post-activation cleanup.
 - `Operational Flows / Serving a snapshot`: pointer, completion, block, and serialization failure boundaries.
 - `Detailed Observability`: sparse logs, low-cardinality metrics, value-free errors, and trace-first diagnosis.

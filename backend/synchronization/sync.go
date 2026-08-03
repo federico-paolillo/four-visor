@@ -78,6 +78,7 @@ type Scheduler struct {
 // New creates a production scheduler with cryptographic instance jitter and monotonic ULID entropy.
 func New(
 	interval time.Duration,
+	deadline time.Duration,
 	tolerance int,
 	client *acquisition.Client,
 	publisher *lineage.Publisher,
@@ -97,7 +98,7 @@ func New(
 		meter:          meter,
 		jitterEntropy:  cryptorand.Reader,
 		lineageEntropy: ulid.DefaultEntropy(),
-		deadline:       LineageDeadline,
+		deadline:       deadline,
 	})
 }
 

@@ -10,8 +10,8 @@ The Reader receives regularly refreshed snapshots even when some upstream resour
 
 ## Scope
 
-- Run one synchronization at a time using `FOURVISOR_` configuration, defaulting to hourly, after a stable instance-local startup jitter between 5 and 60 seconds.
-- At construction start, create a new ULID and capture `observedAt` as UTC RFC 3339; enforce the 30-minute lineage deadline.
+- Run one synchronization at a time using `FOURVISOR_` configuration, defaulting to every four hours, after a stable instance-local startup jitter between 5 and 60 seconds.
+- At construction start, create a new ULID and capture `observedAt` as UTC RFC 3339; enforce the configured lineage deadline, four hours by default.
 - Acquire boards, catalogs, and threads from scratch, validate the final contract, publish atomically, and evict the prior lineage only after success.
 - Activate every successfully constructed/published lineage regardless of failed-resource count, including total 4chan outage represented by `boards.state = failed`.
 - Preserve the active lineage for construction, validation, cache-write, publication, and cancellation failures.
@@ -43,9 +43,9 @@ The Reader receives regularly refreshed snapshots even when some upstream resour
 
 ## Acceptance Criteria
 
-1. The default schedule is hourly, its initial 5–60-second offset is stable for one backend instance, and a tick during an active run is skipped without overlap, queueing, or cancellation; the next ordinary tick remains the next opportunity.
+1. The default schedule is every four hours, its initial 5–60-second offset is stable for one backend instance, and a tick during an active run is skipped without overlap, queueing, or cancellation; the next ordinary tick remains the next opportunity.
 2. A non-default valid synchronization interval changes both scheduler cadence and the Memcached lineage TTL, which remains exactly twice that interval; invalid interval/tolerance settings fail startup clearly.
-3. Each run uses a new valid ULID and one start-time UTC `observedAt`, has a hard 30-minute deadline, and cannot consume prior-lineage resources.
+3. Each run uses a new valid ULID and one start-time UTC `observedAt`, has a configurable hard deadline that defaults to four hours, and cannot consume prior-lineage resources.
 4. Successful construction/publication activates the new lineage and evicts the old; all listed non-resource failures preserve the old active pointer.
 5. Upstream resource failures, including an unfinished board-list request and every known unfinished catalog/thread at the lineage deadline, produce exact failed wrappers and can activate as a contract-valid degraded lineage; external/shutdown cancellation instead preserves the active lineage.
 6. More than 10 failed resources by default changes telemetry only: activation still occurs, the root span becomes error, a prominent structured log is emitted, and the full trace is eligible for failed-trace retention.

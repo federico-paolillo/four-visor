@@ -26,6 +26,7 @@ const (
 	requestTimeoutKey     = "FOURVISOR_ACQUISITION_REQUEST_TIMEOUT"
 	maxRetriesKey         = "FOURVISOR_ACQUISITION_MAX_RETRIES"
 	retryBackoffKey       = "FOURVISOR_ACQUISITION_RETRY_BACKOFF"
+	deadlineKey           = "FOURVISOR_ACQUISITION_DEADLINE"
 	syncIntervalKey       = "FOURVISOR_SYNCHRONIZATION_INTERVAL"
 	failedToleranceKey    = "FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE"
 	commitHashKey         = "FOURVISOR_COMMIT_HASH"
@@ -38,7 +39,8 @@ const (
 	defaultRequestTimeout = 5 * time.Second
 	defaultMaxRetries     = 2
 	defaultRetryBackoff   = time.Second
-	defaultSyncInterval   = time.Hour
+	defaultDeadline       = 4 * time.Hour
+	defaultSyncInterval   = 4 * time.Hour
 	defaultTolerance      = 10
 	minimumRateInterval   = time.Second
 	maximumConcurrency    = 10
@@ -63,6 +65,7 @@ type Acquisition struct {
 	RequestTimeout time.Duration
 	MaxRetries     int
 	RetryBackoff   time.Duration
+	Deadline       time.Duration
 	UserAgent      string
 }
 
@@ -211,6 +214,11 @@ func LoadAcquisition() (Acquisition, error) {
 		return Acquisition{}, err
 	}
 
+	deadline, err := duration(deadlineKey, defaultDeadline)
+	if err != nil {
+		return Acquisition{}, err
+	}
+
 	commitHash := os.Getenv(commitHashKey)
 	if !validCommitHash(commitHash) {
 		return Acquisition{}, configError(commitHashKey, "must be a full lowercase Git commit hash", errInvalidCommit)
@@ -222,6 +230,7 @@ func LoadAcquisition() (Acquisition, error) {
 		RequestTimeout: requestTimeout,
 		MaxRetries:     maxRetries,
 		RetryBackoff:   retryBackoff,
+		Deadline:       deadline,
 		UserAgent:      "4Visor/" + commitHash,
 	}, nil
 }

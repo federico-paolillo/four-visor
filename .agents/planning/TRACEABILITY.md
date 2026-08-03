@@ -55,7 +55,7 @@ The following resolved interpretations are used in the matrix:
 | `Full Requirements / Rendering` | Backend retains HTML; frontend sanitizes; unsupported markup becomes text; external/canonical quote links; no raw injection. | M4; US-013–US-014; I6. |
 | `Full Requirements / Media` | Online thumbnail auto-load; explicit full media; ordinary browser cache only; placeholder/manual retry; spoilers hidden. | US-015. |
 | `Full Requirements / User interface` | Mobile-first responsive compact catalogs; nested/collapsible replies; always-visible lineage ID/age; visible failed/oversize states. | US-012, US-014; I3. |
-| `Full Requirements / Upstream acquisition` | Configurable hourly backend schedule; stable 5–60-second startup jitter; concurrency 10; global rate limit; five-second timeout; thirty-minute lineage deadline; transient-only bounded retry; exact User-Agent. | US-001, US-003, US-004, US-007; M5. |
+| `Full Requirements / Upstream acquisition` | Configurable four-hour backend schedule; stable 5–60-second startup jitter; concurrency 10; global rate limit; five-second timeout; configurable four-hour lineage deadline; transient-only bounded retry; exact User-Agent. | US-001, US-003, US-004, US-007; M5. |
 | `Full Requirements / Failure handling` | Failed known resources; absent unknown resources; degraded activation; pre-activation failure preserves old lineage; prominent degraded telemetry; all unfinished resources fail at deadline. | US-003–US-007, US-010, US-018; I4, I5, I7. |
 | `Full Requirements / Deployment` | Compose; sole loopback edge; exact routing; separate internal services; ingress TLS; project-image hardening; `FOURVISOR_`; shallow health. | US-001, US-016, US-017. |
 | `Full Requirements / Platform and testing` | Linux amd64; Chrome Android 150+; unit/integration only. | US-008, US-016; every story's validation and `docs/TODO.md` validation assumptions. |
@@ -84,7 +84,7 @@ The following resolved interpretations are used in the matrix:
 | `Client startup` | IndexedDB required; blocking clear failure; immediate active render; explicit empty state; schedule next sync. | US-009, US-011. |
 | `Client synchronization` | Due-only complete request; inactive staging; validation; atomic activation/cleanup; classified visible errors; next scheduled retry; backend authority. | M2, M3; US-010, US-011; I2. |
 | `First installation jitter` | Random non-fingerprint seed in IndexedDB; never transmitted; stable until reset; 5–60-second offset. | US-009, US-011. |
-| `Scheduled backend synchronization` | Hourly stable instance jitter; new ULID; hard deadline; ordered acquisition; publication/activation/eviction; one build at a time. | M5; US-007, relying on US-003–US-005. |
+| `Scheduled backend synchronization` | Four-hour stable instance jitter; new ULID; hard deadline; ordered acquisition; publication/activation/eviction; one build at a time. | M5; US-007, relying on US-003–US-005. |
 | `Board acquisition` | Exact board order/data; transient-only retry; root failure activates `boards.failed`; no prior/inferred boards. | US-003, US-007. |
 | `Catalog acquisition` | Every known board; first 250 across preserved pages; failed versus absent semantics. | US-003; I4. |
 | `Thread acquisition` | Fetch each selected thread; 250 cap; oversize; retry classification; deadline failure; no remainder endpoint. | US-004. |
@@ -192,7 +192,7 @@ The following resolved interpretations are used in the matrix:
 | `Locked Decisions / Backend cache` | Exact board/thread/post limits, oversize, no binary, unchanged HTML. | US-002–US-004. |
 | `Locked Decisions / Frontend` | Exact stack/target/storage/UI; no state framework/router. | US-008–US-015. |
 | `Locked Decisions / Rendering` | Sanitize, text fallback, clickable/canonical links, visible degradation. | M4; US-012–US-014; I6. |
-| `Locked Decisions / Synchronization` | Default hourly stable client/backend jitter; complete swap; one retained active lineage. | M2, M5; US-005, US-007, US-009–US-011. |
+| `Locked Decisions / Synchronization` | Default approximately-hourly client jitter and four-hour backend jitter; complete swap; one retained active lineage. | M2, M5; US-005, US-007, US-009–US-011. |
 | `Locked Decisions / Backend` | Exact backend/cache/topology/routing/compression/hardening/platform/configuration. | M1; US-001, US-005–US-007, US-016, US-017. |
 | `Locked Decisions / Testing` | Unit/integration only. | Global principles and every validation section. |
 | `Locked Decisions / Upstream` | Limiting/concurrency/timeout/deadline/retry/User-Agent. | US-003, US-004, US-007. |
@@ -225,7 +225,7 @@ The following resolved interpretations are used in the matrix:
 - The active-pointer switch is the commit boundary. Pre-switch failures preserve the old lineage; post-switch cleanup failures preserve the new lineage and use TTL cleanup.
 - Collector/exporter failure does not fail unrelated application operations.
 - The global upstream default is one request per second, matching the official 4chan API rule. Transient requests receive at most two retries with one- then two-second backoff unless `Retry-After` is longer.
-- The default excessive-degradation tolerance is 10 failed resources. The default synchronization interval is one hour, configurable through `FOURVISOR_`; Memcached lineage TTL is always twice the configured interval.
+- The default excessive-degradation tolerance is 10 failed resources. The default synchronization interval is four hours, configurable through `FOURVISOR_`; Memcached lineage TTL is always twice the configured interval.
 - Every project-controlled local or Compose service listener, proxy target, container, health-check, and published port uses 65100–65199; remote upstream, ingress, and operator exporter destinations are excluded. Only edge Caddy publishes a host port, explicitly on `127.0.0.1`.
 - Semantic and keyboard-operable controls are implementation-quality requirements, not new SEED product scope.
 

@@ -13,7 +13,7 @@ The Reader gets the first 250 posts exactly as observed, with oversized, failed,
 - Fetch the thread belonging to each of the first 250 catalog summaries through the shared outbound limiter and retry policy.
 - Preserve every returned post object, original post HTML, media reference, and post order unchanged.
 - Store zero through 250 posts as `present`; truncate more than 250 to the first 250 and mark the resource `oversize`.
-- Mark terminal/exhausted failures and unfinished resources at the 30-minute lineage deadline as `failed` without a failure-detail payload.
+- Mark terminal/exhausted failures and unfinished resources at the configured lineage deadline as `failed` without a failure-detail payload.
 - Stop scheduling or continuing unfinished acquisition after deadline/cancellation and propagate cancellation through workers.
 - Record oversize detection and errors as meaningful logs and child spans; expose failed-resource counts without high-cardinality labels.
 

@@ -51,7 +51,7 @@ traceability, but creating MADRs for them would only restate the source.
 | Initial transfer form | Version 1 is exposed as one logical snapshot in one JSON response. Public manifests, range requests, resumable downloads, per-resource endpoints, and binary serialization are excluded. Fixed public batches are a future response only to measured size problems. | `High-Level Architecture / Snapshot transfer`; `Full Requirements / Client synchronization` |
 | Backend cache lifecycle | A new lineage namespace is completed before one active pointer changes; the previous namespace is evicted after activation; lineage keys have a TTL of twice the configured interval as cleanup insurance. | `High-Level Architecture / Backend`; `Operational Flows / Lineage construction and activation`; `Design Notes / Memcached as a serving cache` |
 | Acquisition contents | All observed boards, first 250 catalog threads in returned order, and first 250 returned posts per fetched thread are included; over-250 threads are truncated and marked `oversize`. | `Full Requirements / Backend cache`; `High-Level Architecture / Snapshot contents`; `Operational Flows / Catalog acquisition` and `Thread acquisition` |
-| Acquisition envelope | Hourly configurable backend schedule, stable 5-60 second instance jitter, global rate limiting, default concurrency 10, five-second requests, thirty-minute lineage deadline, transient-only bounded retries, and commit-bearing User-Agent. | `Full Requirements / Upstream acquisition`; `High-Level Architecture / Upstream acquisition`; `Operational Flows / Retry behavior`; `Locked Decisions / Upstream` |
+| Acquisition envelope | Configurable four-hour backend schedule, stable 5-60 second instance jitter, global rate limiting, default concurrency 10, five-second requests, configurable four-hour lineage deadline, transient-only bounded retries, and commit-bearing User-Agent. | `Full Requirements / Upstream acquisition`; `High-Level Architecture / Upstream acquisition`; `Operational Flows / Retry behavior`; `Locked Decisions / Upstream` |
 | Resource and lineage failure boundary | Known upstream request failures become resource states and do not block activation. Construction, contract validation, publication, cache write, and cancellation failures do block pointer replacement. | `Full Requirements / Failure handling`; `Operational Flows / Degraded lineage completion` and `Lineage construction and activation`; `Failure Semantics / Upstream failures`; `Locked Decisions / Failure semantics` |
 | Browser synchronization semantics | Approximately hourly refresh with persisted installation-local 5-60 second jitter; stage the full candidate, validate it, atomically activate it, preserve the previous lineage on any failure, and accept the backend-selected lineage without timestamp comparison or reconciliation. | `Full Requirements / Client synchronization`; `Operational Flows / Client synchronization` and `First installation jitter`; `Locked Decisions / Synchronization` |
 | Browser storage boundaries | IndexedDB is mandatory and exclusively holds snapshot data; Cache Storage holds only the application shell/static assets; reset clears both and the jitter seed; quota failure preserves the active lineage. | `Full Requirements / Local storage`; `High-Level Architecture / Client architecture`; `Operational Flows / Client startup` and `Local reset`; `Locked Decisions / Frontend` |
@@ -479,7 +479,7 @@ Negative:
 #### Context
 
 The scheduler follows a configured fixed interval after a stable startup jitter,
-and a lineage build can run for up to thirty minutes. The backend owns only one
+and a lineage build runs within a configured global deadline. The backend owns only one
 lineage under construction. A short configured interval or delayed build can
 therefore cause a new tick while work is active. The seed excludes distributed
 coordination and repair queues but does not say whether the local tick queues,
@@ -522,8 +522,8 @@ Positive:
 - At most one acquisition tree consumes resources or publishes cache data.
 - No queue, coordinator, generation race, or cancellation handoff is needed.
 - The current active lineage remains served throughout a long build.
-- Default settings normally avoid the edge case because the one-hour interval
-  exceeds the thirty-minute deadline.
+- The four-hour synchronization interval matches the four-hour acquisition
+  deadline by default, so a delayed tick may still be skipped without overlap.
 
 Negative:
 

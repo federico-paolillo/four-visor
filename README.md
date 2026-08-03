@@ -44,13 +44,16 @@ Docker and Docker Compose as the deployment user without `sudo`.
 | `FOURVISOR_ACQUISITION_REQUEST_TIMEOUT` | `5s` | Timeout for one outbound request attempt and response body. |
 | `FOURVISOR_ACQUISITION_MAX_RETRIES` | `2` | Retries after the initial attempt, from 0 through 2. |
 | `FOURVISOR_ACQUISITION_RETRY_BACKOFF` | `1s` | Base retry delay. |
-| `FOURVISOR_SYNCHRONIZATION_INTERVAL` | `1h` | Synchronization cadence in whole seconds, minimum `1s`. |
+| `FOURVISOR_ACQUISITION_DEADLINE` | `4h` | Evidence-backed total acquisition deadline; operator overrides may use any positive duration. |
+| `FOURVISOR_SYNCHRONIZATION_INTERVAL` | `4h` | Synchronization cadence in whole seconds, minimum `1s`. |
 | `FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE` | `10` | Failed-resource observability threshold. |
 | `FOURVISOR_COMMIT_HASH` | required | Full lowercase 40-character deployed Git commit. |
 
 The backend image supplies every listed optional default. Required values have
 empty image placeholders, and empty optional durations or integers are invalid.
 Compose supplies the Memcached address and commit hash.
+The native calibration evidence supporting the deadline is recorded in
+[`docs/STATS.md`](docs/STATS.md).
 
 ### Compose setup
 

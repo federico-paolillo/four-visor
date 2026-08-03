@@ -31,6 +31,7 @@ func TestLoadDefaults(t *testing.T) {
 			RequestTimeout: defaultRequestTimeout,
 			MaxRetries:     defaultMaxRetries,
 			RetryBackoff:   defaultRetryBackoff,
+			Deadline:       defaultDeadline,
 			UserAgent:      "4Visor/0123456789abcdef0123456789abcdef01234567",
 		},
 		Synchronization: Synchronization{
@@ -56,6 +57,7 @@ func TestLoadOverrides(t *testing.T) {
 	t.Setenv(requestTimeoutKey, "3s")
 	t.Setenv(maxRetriesKey, "1")
 	t.Setenv(retryBackoffKey, "500ms")
+	t.Setenv(deadlineKey, "30m")
 	t.Setenv(syncIntervalKey, "1s")
 	t.Setenv(failedToleranceKey, "4")
 
@@ -71,6 +73,7 @@ func TestLoadOverrides(t *testing.T) {
 	if got.Acquisition.RateInterval != 2*time.Second || got.Acquisition.MaxConcurrency != 4 ||
 		got.Acquisition.RequestTimeout != 3*time.Second || got.Acquisition.MaxRetries != 1 ||
 		got.Acquisition.RetryBackoff != 500*time.Millisecond ||
+		got.Acquisition.Deadline != 30*time.Minute ||
 		got.Acquisition.UserAgent != "4Visor/0123456789abcdef0123456789abcdef01234567" {
 		t.Fatalf("Load() returned unexpected acquisition overrides: %#v", got.Acquisition)
 	}
@@ -103,6 +106,8 @@ func TestLoadValidation(t *testing.T) {
 		{name: "negative retries", key: maxRetriesKey, value: "-1"},
 		{name: "retries above maximum", key: maxRetriesKey, value: "3"},
 		{name: "zero retry backoff", key: retryBackoffKey, value: "0s"},
+		{name: "invalid acquisition deadline", key: deadlineKey, value: "later"},
+		{name: "zero acquisition deadline", key: deadlineKey, value: "0s"},
 		{name: "invalid synchronization interval", key: syncIntervalKey, value: "later"},
 		{name: "zero synchronization interval", key: syncIntervalKey, value: "0s"},
 		{name: "subsecond synchronization interval", key: syncIntervalKey, value: "999ms"},
@@ -211,6 +216,7 @@ func clearEnvironment(t *testing.T) {
 		requestTimeoutKey,
 		maxRetriesKey,
 		retryBackoffKey,
+		deadlineKey,
 		syncIntervalKey,
 		failedToleranceKey,
 		commitHashKey,

@@ -11,8 +11,6 @@ import (
 const (
 	minimumStartupJitter = 5 * time.Second
 	maximumStartupJitter = 60 * time.Second
-	// LineageDeadline bounds every complete snapshot observation.
-	LineageDeadline = 30 * time.Minute
 )
 
 // Run waits for the instance jitter, then consumes a fixed cadence until cancellation.

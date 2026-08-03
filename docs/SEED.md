@@ -167,12 +167,12 @@ Deploys, monitors and upgrades 4Visor.
 
 ### Upstream acquisition
 
-- Default synchronization interval is one hour and configurable.
+- Default synchronization interval is four hours and configurable.
 - Backend startup jitter is stable between 5 and 60 seconds.
 - Maximum outbound concurrency defaults to 10.
 - Outbound requests are globally rate limited.
 - Individual requests time out after five seconds.
-- Lineage construction has a maximum duration of thirty minutes.
+- Lineage construction has a configurable maximum duration of four hours by default.
 - Selective retries are permitted only for transient failures such as timeouts,
   network failures and rate limiting.
 - Outbound User-Agent is `4Visor/<commit-hash-of-deployed-version>`.
@@ -497,7 +497,7 @@ Version 1 has no migration, adapter or compatibility window.
 
 ```mermaid
 flowchart TD
-    Trigger[Scheduled lineage trigger] --> Deadline[Start 30-minute lineage deadline]
+    Trigger[Scheduled lineage trigger] --> Deadline[Start configured lineage deadline]
     Deadline --> RateLimit[Global outbound rate limiter]
     RateLimit --> Request[4chan HTTP request]
     Request -->|success| Store[Store resource in building lineage]
@@ -514,12 +514,12 @@ The backend performs scheduled acquisition on its own schedule.
 
 Default acquisition policy:
 
-- synchronization every hour;
+- synchronization every four hours;
 - stable instance-local startup jitter between 5 and 60 seconds;
 - maximum outbound concurrency of 10;
 - global request rate limiting;
 - five-second request timeout;
-- thirty-minute maximum lineage duration;
+- configurable lineage duration, four hours by default;
 - bounded retries for network failures, timeouts and rate limiting;
 - outbound `User-Agent` of `4Visor/<commit-hash-of-deployed-version>`.
 
@@ -681,8 +681,8 @@ Resetting local data removes the seed and causes a new offset to be generated.
 
 ```mermaid
 flowchart TD
-    Scheduler[Hourly scheduler plus stable instance jitter] --> Begin[Create new ULID lineage]
-    Begin --> Deadline[Start 30-minute synchronization deadline]
+    Scheduler[Four-hour scheduler plus stable instance jitter] --> Begin[Create new ULID lineage]
+    Begin --> Deadline[Start configured synchronization deadline]
     Deadline --> Boards[Fetch board list]
     Boards --> Catalogs[Fetch board catalogs]
     Catalogs --> Threads[Fetch eligible threads]
@@ -695,7 +695,7 @@ flowchart TD
 
 The backend runs its own scheduler and constructs one lineage at a time.
 
-The default synchronization interval is one hour. The backend selects a stable
+The default synchronization interval is four hours. The backend selects a stable
 random startup offset between 5 and 60 seconds.
 
 The synchronization process starts from scratch. No resource is retained merely
@@ -804,7 +804,7 @@ Retries remain subject to:
 
 - the global outbound rate limiter;
 - the five-second request timeout;
-- the thirty-minute lineage deadline.
+- the configured lineage deadline.
 
 The system does not provide retry queues, background repair or guaranteed
 completion.
@@ -1728,7 +1728,7 @@ bounded retry.
 
 Permanent or exhausted failures mark the affected resource as `failed`.
 
-Resources that have not completed acquisition when the thirty-minute lineage
+Resources that have not completed acquisition when the configured lineage
 deadline expires are marked failed and excluded from further acquisition until
 the next lineage.
 
@@ -2159,7 +2159,7 @@ not to have.
 
 ### Synchronization
 
-- Hourly synchronization by default.
+- Backend synchronization every four hours by default.
 - Stable installation-local client jitter.
 - Stable backend startup jitter.
 - Complete lineage download before activation.
@@ -2199,7 +2199,7 @@ not to have.
 - Global outbound rate limiting.
 - Default outbound concurrency of 10.
 - Five-second request timeout.
-- Thirty-minute lineage deadline.
+- Configurable lineage deadline, four hours by default.
 - Bounded retries only for transient failures.
 - User-Agent is `4Visor/<commit-hash-of-deployed-version>`.
 

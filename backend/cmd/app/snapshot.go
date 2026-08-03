@@ -16,7 +16,6 @@ import (
 	"git.disroot.org/federico-paolillo/four-visor.git/acquisition"
 	"git.disroot.org/federico-paolillo/four-visor.git/config"
 	"git.disroot.org/federico-paolillo/four-visor.git/snapshot"
-	"git.disroot.org/federico-paolillo/four-visor.git/synchronization"
 	"github.com/oklog/ulid/v2"
 	"go.opentelemetry.io/otel"
 )
@@ -61,7 +60,7 @@ func exportSnapshot(parent context.Context, args []string, stderr io.Writer, htt
 	signalCtx, stop := signal.NotifyContext(parent, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	ctx, cancel := context.WithTimeout(signalCtx, synchronization.LineageDeadline)
+	ctx, cancel := context.WithTimeout(signalCtx, settings.Deadline)
 	defer cancel()
 
 	identifier, err := ulid.New(ulid.Timestamp(startedAt), ulid.DefaultEntropy())
