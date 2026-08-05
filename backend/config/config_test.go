@@ -21,9 +21,7 @@ func TestLoadDefaults(t *testing.T) {
 
 	want := Config{
 		ServerAddress:    defaultServerAddress,
-		HealthTimeout:    defaultHealthTimeout,
 		MemcachedAddress: "memcached:65100",
-		DNSName:          defaultDNSName,
 		OTLPEndpoint:     defaultOTLPEndpoint,
 		Acquisition: Acquisition{
 			RateInterval:   defaultRateInterval,
@@ -48,9 +46,7 @@ func TestLoadOverrides(t *testing.T) {
 	clearEnvironment(t)
 	setRequiredEnvironment(t)
 	t.Setenv(serverAddressKey, "127.0.0.1:65120")
-	t.Setenv(healthTimeoutKey, "750ms")
 	t.Setenv(memcachedAddressKey, "cache.internal:65121")
-	t.Setenv(dnsNameKey, "boards.4chan.org")
 	t.Setenv(otlpEndpointKey, "https://collector.example:4317")
 	t.Setenv(rateIntervalKey, "2s")
 	t.Setenv(maxConcurrencyKey, "4")
@@ -65,8 +61,7 @@ func TestLoadOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got.ServerAddress != "127.0.0.1:65120" || got.HealthTimeout != 750*time.Millisecond ||
-		got.MemcachedAddress != "cache.internal:65121" || got.DNSName != "boards.4chan.org" ||
+	if got.ServerAddress != "127.0.0.1:65120" || got.MemcachedAddress != "cache.internal:65121" ||
 		got.OTLPEndpoint != "https://collector.example:4317" {
 		t.Fatalf("Load() returned unexpected overrides: %#v", got)
 	}
@@ -89,11 +84,8 @@ func TestLoadValidation(t *testing.T) {
 		value string
 	}{
 		{name: "missing Memcached", key: memcachedAddressKey},
-		{name: "invalid duration", key: healthTimeoutKey, value: "later"},
-		{name: "zero duration", key: healthTimeoutKey, value: "0s"},
 		{name: "server outside project range", key: serverAddressKey, value: ":65099"},
 		{name: "Memcached outside project range", key: memcachedAddressKey, value: "cache:65099"},
-		{name: "invalid DNS name", key: dnsNameKey, value: "-4chan.example"},
 		{name: "invalid OTLP endpoint", key: otlpEndpointKey, value: "collector:4317"},
 		{name: "OTLP query", key: otlpEndpointKey, value: "https://collector.example:4317?token=secret"},
 		{name: "OTLP fragment", key: otlpEndpointKey, value: "https://collector.example:4317#secret"},
@@ -182,7 +174,7 @@ func TestLoadDiagnosticRedactsValueAndPreservesCause(t *testing.T) {
 	clearEnvironment(t)
 	setRequiredEnvironment(t)
 	const secret = "credential-do-not-log"
-	t.Setenv(healthTimeoutKey, secret)
+	t.Setenv(requestTimeoutKey, secret)
 
 	_, err := Load()
 	if err == nil {
@@ -198,7 +190,7 @@ func TestLoadDiagnosticRedactsValueAndPreservesCause(t *testing.T) {
 	if strings.Contains(err.Error(), secret) || strings.Contains(output.String(), secret) {
 		t.Fatalf("diagnostic disclosed configured value: %s", output.String())
 	}
-	if !strings.Contains(output.String(), healthTimeoutKey) {
+	if !strings.Contains(output.String(), requestTimeoutKey) {
 		t.Fatalf("diagnostic omitted setting name: %s", output.String())
 	}
 }
@@ -207,9 +199,7 @@ func clearEnvironment(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{
 		serverAddressKey,
-		healthTimeoutKey,
 		memcachedAddressKey,
-		dnsNameKey,
 		otlpEndpointKey,
 		rateIntervalKey,
 		maxConcurrencyKey,

@@ -3,16 +3,12 @@ package telemetry
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
 	"testing"
-	"time"
 
-	"git.disroot.org/federico-paolillo/four-visor.git/health"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -24,12 +20,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-type checkerFunc func(context.Context) error
-
-func (check checkerFunc) Check(ctx context.Context) error {
-	return check(ctx)
-}
-
 func TestHTTPHandlerSpansAndMetrics(t *testing.T) {
 	spanExporter := tracetest.NewInMemoryExporter()
 	tracerProvider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(spanExporter))
@@ -39,8 +29,8 @@ func TestHTTPHandlerSpansAndMetrics(t *testing.T) {
 	t.Cleanup(func() { _ = meterProvider.Shutdown(t.Context()) })
 	propagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{}, propagation.Baggage{})
 
-	good := instrumentedHealth(t, tracerProvider, meterProvider, propagator, nil)
-	bad := instrumentedHealth(t, tracerProvider, meterProvider, propagator, errors.New("private dependency detail"))
+	good := instrumentedSnapshot(t, tracerProvider, meterProvider, propagator, nil)
+	bad := instrumentedSnapshot(t, tracerProvider, meterProvider, propagator, errors.New("private dependency detail"))
 
 	requests := []struct {
 		handler http.Handler
@@ -48,11 +38,11 @@ func TestHTTPHandlerSpansAndMetrics(t *testing.T) {
 		path    string
 		status  int
 	}{
-		{handler: good, method: http.MethodGet, path: "/health", status: http.StatusOK},
-		{handler: bad, method: http.MethodGet, path: "/health", status: http.StatusServiceUnavailable},
-		{handler: good, method: http.MethodPost, path: "/health", status: http.StatusMethodNotAllowed},
+		{handler: good, method: http.MethodGet, path: "/snapshot", status: http.StatusOK},
+		{handler: bad, method: http.MethodGet, path: "/snapshot", status: http.StatusServiceUnavailable},
+		{handler: good, method: http.MethodPost, path: "/snapshot", status: http.StatusMethodNotAllowed},
 		{handler: good, method: http.MethodGet, path: "/unknown/attacker-value", status: http.StatusNotFound},
-		{handler: good, method: "ATTACKER-CONTROLLED", path: "/health", status: http.StatusMethodNotAllowed},
+		{handler: good, method: "ATTACKER-CONTROLLED", path: "/snapshot", status: http.StatusMethodNotAllowed},
 	}
 	for _, request := range requests {
 		response := httptest.NewRecorder()
@@ -66,30 +56,30 @@ func TestHTTPHandlerSpansAndMetrics(t *testing.T) {
 	assertHTTPMetrics(t, reader)
 }
 
-func TestHTTPHandlerStartsPublicRootAndParentsHealthSpans(t *testing.T) {
+func TestHTTPHandlerStartsPublicRootAndParentsSnapshotSpan(t *testing.T) {
 	spanExporter := tracetest.NewInMemoryExporter()
 	tracerProvider := tracesdk.NewTracerProvider(tracesdk.WithSyncer(spanExporter))
 	t.Cleanup(func() { _ = tracerProvider.Shutdown(t.Context()) })
 	meterProvider := metricsdk.NewMeterProvider()
 	t.Cleanup(func() { _ = meterProvider.Shutdown(t.Context()) })
 	propagator := propagation.NewCompositeTextMapPropagator(propagation.TraceContext{})
-	handler := instrumentedHealth(t, tracerProvider, meterProvider, propagator, nil)
+	handler := instrumentedSnapshot(t, tracerProvider, meterProvider, propagator, nil)
 
-	request := httptest.NewRequest(http.MethodGet, "/health", http.NoBody)
+	request := httptest.NewRequest(http.MethodGet, "/snapshot", http.NoBody)
 	request.Header.Set("traceparent", "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, request)
 
 	var server *tracetest.SpanStub
-	children := make(map[string]tracetest.SpanStub)
+	var child *tracetest.SpanStub
 	spans := spanExporter.GetSpans()
 	for index := range spans {
 		span := &spans[index]
 		if span.SpanKind == trace.SpanKindServer {
 			server = span
 		}
-		if span.Name == "health.memcached" || span.Name == "health.dns" {
-			children[span.Name] = *span
+		if span.Name == "snapshot.read" {
+			child = span
 		}
 	}
 	if server == nil {
@@ -103,15 +93,12 @@ func TestHTTPHandlerStartsPublicRootAndParentsHealthSpans(t *testing.T) {
 		server.Links[0].SpanContext.SpanID().String() != "00f067aa0ba902b7" {
 		t.Fatalf("server links = %#v, want incoming remote trace context", server.Links)
 	}
-	for _, name := range []string{"health.memcached", "health.dns"} {
-		child, ok := children[name]
-		if !ok {
-			t.Fatalf("%s span missing; spans=%v", name, spanNames(spans))
-		}
-		if child.Parent.TraceID() != server.SpanContext.TraceID() ||
-			child.Parent.SpanID() != server.SpanContext.SpanID() {
-			t.Fatalf("%s parent = %v, want server span %v", name, child.Parent, server.SpanContext)
-		}
+	if child == nil {
+		t.Fatalf("snapshot.read span missing; spans=%v", spanNames(spans))
+	}
+	if child.Parent.TraceID() != server.SpanContext.TraceID() ||
+		child.Parent.SpanID() != server.SpanContext.SpanID() {
+		t.Fatalf("snapshot.read parent = %v, want server span %v", child.Parent, server.SpanContext)
 	}
 }
 
@@ -122,7 +109,7 @@ func TestHTTPHandlerExporterFailureIsNonFatal(t *testing.T) {
 	meterProvider := metricsdk.NewMeterProvider()
 	t.Cleanup(func() { _ = meterProvider.Shutdown(t.Context()) })
 
-	handler := instrumentedHealth(
+	handler := instrumentedSnapshot(
 		t,
 		tracerProvider,
 		meterProvider,
@@ -130,7 +117,7 @@ func TestHTTPHandlerExporterFailureIsNonFatal(t *testing.T) {
 		nil,
 	)
 	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/health", http.NoBody))
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/snapshot", http.NoBody))
 	if response.Code != http.StatusOK {
 		t.Fatalf("status after export failure = %d, want 200", response.Code)
 	}
@@ -152,20 +139,36 @@ func (failingExporter) Shutdown(context.Context) error {
 	return nil
 }
 
-func instrumentedHealth(
+func instrumentedSnapshot(
 	t *testing.T,
 	tracerProvider trace.TracerProvider,
 	meterProvider *metricsdk.MeterProvider,
 	propagator propagation.TextMapPropagator,
-	cacheError error,
+	readError error,
 ) http.Handler {
 	t.Helper()
-	cache := checkerFunc(func(context.Context) error { return cacheError })
-	dns := checkerFunc(func(context.Context) error { return nil })
-	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	handler := health.NewHandler(time.Second, logger, tracerProvider.Tracer("test/health"), cache, dns)
+	tracer := tracerProvider.Tracer("test/snapshot")
 	mux := http.NewServeMux()
-	mux.Handle("/health", handler)
+	mux.HandleFunc("/snapshot", func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			writer.Header().Set("Allow", http.MethodGet)
+			writer.WriteHeader(http.StatusMethodNotAllowed)
+
+			return
+		}
+
+		_, span := tracer.Start(request.Context(), "snapshot.read")
+		defer span.End()
+		if readError == nil {
+			writer.WriteHeader(http.StatusOK)
+
+			return
+		}
+
+		span.SetStatus(codes.Error, "snapshot unavailable")
+		trace.SpanFromContext(request.Context()).SetStatus(codes.Error, "snapshot unavailable")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+	})
 	instrumented, err := HTTPHandler(mux, tracerProvider, meterProvider, propagator)
 	if err != nil {
 		t.Fatalf("HTTPHandler() error = %v", err)
@@ -177,23 +180,23 @@ func instrumentedHealth(
 func assertRootSpans(t *testing.T, spans tracetest.SpanStubs) {
 	t.Helper()
 	var roots tracetest.SpanStubs
-	var failedHealthChildren int
+	var failedSnapshotChildren int
 	for _, span := range spans {
 		if span.SpanKind == trace.SpanKindServer {
 			roots = append(roots, span)
 		}
-		if span.Name == "health.memcached" && span.Status.Code == codes.Error {
-			failedHealthChildren++
+		if span.Name == "snapshot.read" && span.Status.Code == codes.Error {
+			failedSnapshotChildren++
 		}
 	}
 	if len(roots) != 5 {
 		t.Fatalf("root span count = %d, want 5; spans=%v", len(roots), spanNames(spans))
 	}
-	if failedHealthChildren != 1 {
-		t.Fatalf("failed Memcached child spans = %d, want 1", failedHealthChildren)
+	if failedSnapshotChildren != 1 {
+		t.Fatalf("failed snapshot child spans = %d, want 1", failedSnapshotChildren)
 	}
 
-	wantNames := []string{"GET", "GET /health", "GET /health", "POST /health", "_OTHER /health"}
+	wantNames := []string{"GET", "GET /snapshot", "GET /snapshot", "POST /snapshot", "_OTHER /snapshot"}
 	gotNames := spanNames(roots)
 	slices.Sort(gotNames)
 	slices.Sort(wantNames)
@@ -219,11 +222,11 @@ func assertHTTPMetrics(t *testing.T, reader *metricsdk.ManualReader) {
 	}
 
 	want := map[metricAttributes]uint64{
-		{method: http.MethodGet, route: "/health", status: http.StatusOK}:                 1,
-		{method: http.MethodGet, route: "/health", status: http.StatusServiceUnavailable}: 1,
-		{method: http.MethodPost, route: "/health", status: http.StatusMethodNotAllowed}:  1,
-		{method: http.MethodGet, route: "unmatched", status: http.StatusNotFound}:         1,
-		{method: "_OTHER", route: "/health", status: http.StatusMethodNotAllowed}:         1,
+		{method: http.MethodGet, route: "/snapshot", status: http.StatusOK}:                 1,
+		{method: http.MethodGet, route: "/snapshot", status: http.StatusServiceUnavailable}: 1,
+		{method: http.MethodPost, route: "/snapshot", status: http.StatusMethodNotAllowed}:  1,
+		{method: http.MethodGet, route: "unmatched", status: http.StatusNotFound}:           1,
+		{method: "_OTHER", route: "/snapshot", status: http.StatusMethodNotAllowed}:         1,
 	}
 	requestPoints := make(map[metricAttributes]uint64)
 	durationPoints := make(map[metricAttributes]uint64)

@@ -25,135 +25,31 @@ this project but you cannot say I have not designed and architected the project.
 All automatic guardrails (linters, formatters, etc.) have been configured and
 prepared personally by me.
 
-## Operator guide
+## Goal
 
-The Compose deployment supports Linux amd64 and a rootless Docker daemon. Run
-Docker and Docker Compose as the deployment user without `sudo`.
+This repository source code and consequent software is not the goal. The goal of
+this repository is to try out and tune an autonomous AI-driven process (driven
+mainly by `/goal`) to decompose and implement a software from start to finish
+using a [design document](docs/SEED.md).
 
-### Backend environment
+## Configuration
 
-| Environment variable | Default | Purpose |
-| --- | --- | --- |
-| `FOURVISOR_SERVER_ADDRESS` | `:65102` | Backend HTTP listener. |
-| `FOURVISOR_HEALTH_TIMEOUT` | `2s` | Total Memcached and DNS health deadline. |
-| `FOURVISOR_MEMCACHED_ADDRESS` | required | Memcached host and project port. |
-| `FOURVISOR_DNS_NAME` | `a.4cdn.org` | Hostname resolved by health checks. |
-| `FOURVISOR_OTLP_ENDPOINT` | `http://otelcol:65103` | OTLP/gRPC Collector URL. |
-| `FOURVISOR_ACQUISITION_RATE_INTERVAL` | `1s` | Minimum interval between outbound attempts; must be at least `1s`. |
-| `FOURVISOR_ACQUISITION_MAX_CONCURRENCY` | `10` | Process-wide outbound concurrency, from 1 through 10. |
-| `FOURVISOR_ACQUISITION_REQUEST_TIMEOUT` | `5s` | Timeout for one outbound request attempt and response body. |
-| `FOURVISOR_ACQUISITION_MAX_RETRIES` | `2` | Retries after the initial attempt, from 0 through 2. |
-| `FOURVISOR_ACQUISITION_RETRY_BACKOFF` | `1s` | Base retry delay. |
-| `FOURVISOR_ACQUISITION_DEADLINE` | `4h` | Evidence-backed total acquisition deadline; operator overrides may use any positive duration. |
-| `FOURVISOR_SYNCHRONIZATION_INTERVAL` | `4h` | Synchronization cadence in whole seconds, minimum `1s`. |
-| `FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE` | `10` | Failed-resource observability threshold. |
-| `FOURVISOR_COMMIT_HASH` | required | Full lowercase 40-character deployed Git commit. |
+> Provide these values as a `.env` file (refer to .env.example)
 
-The backend image supplies every listed optional default. Required values have
-empty image placeholders, and empty optional durations or integers are invalid.
-Compose supplies the Memcached address and commit hash.
-The native calibration evidence supporting the deadline is recorded in
-[`docs/STATS.md`](docs/STATS.md).
-
-### Compose setup
-
-Copy the environment template, determine the checked-out commit, and fill all
-four required values in `.env`. Do not put credentials in the tracked example.
-
-```sh
-cp .env.example .env
-git rev-parse HEAD
-```
-
-| Required variable | Value |
-| --- | --- |
-| `FOURVISOR_COMMIT_HASH` | Full lowercase hash printed by `git rev-parse HEAD`. |
-| `GRAFANA_CLOUD_OTLP_ENDPOINT` | Grafana Cloud OTLP/HTTP base URL. |
-| `GRAFANA_CLOUD_INSTANCE_ID` | Grafana Cloud Basic Auth instance ID. |
-| `GRAFANA_CLOUD_API_KEY` | Grafana Cloud Basic Auth API key. |
-
-Optional backend overrides in `.env.example` remain commented unless needed.
-
-### Start and stop
-
-Render the configuration, pull the upstream images, build the first-party
-images, and start the deployment:
-
-```sh
-docker compose config
-docker compose pull edge memcached otelcol
-docker compose build --pull backend frontend
-docker compose up -d --no-build
-```
-
-Stop and resume the existing deployment with:
-
-```sh
-docker compose stop
-docker compose up -d --no-build
-```
-
-### Upgrade
-
-Fast-forward the checkout, replace the commit hash in `.env` with the new
-`git rev-parse HEAD` value, then rebuild and recreate the deployment:
-
-```sh
-git pull --ff-only
-git rev-parse HEAD
-docker compose config
-docker compose pull edge memcached otelcol
-docker compose build --pull backend frontend
-docker compose up -d --no-build --remove-orphans
-```
-
-### Ingress
-
-Only edge Caddy is published, as plain HTTP on `127.0.0.1:65199`. Configure the
-VPS ingress to proxy to `http://127.0.0.1:65199`; the ingress remains the sole
-owner of TLS termination and Brotli compression. Edge routes `/api/*` to the
-backend and all other paths to the frontend. Do not add public, IPv6, or
-all-interface Docker publications, and do not change the host firewall.
-
-### Troubleshooting
-
-Check the rendered configuration, service state, and relevant logs first:
-
-```sh
-docker compose config
-docker compose ps
-docker compose logs edge frontend backend memcached otelcol
-```
-
-Memcached is disposable. After its loss, snapshot requests return `410 Gone`
-until the next scheduled synchronization rebuilds serving state. If only
-telemetry is missing, inspect the backend and Collector logs and verify the
-Grafana Cloud endpoint and credentials; telemetry loss does not change normal
-application processing.
-
-At startup, `effective backend policy configured` reports the active acquisition
-rate, concurrency, request timeout, retry policy, synchronization interval,
-lineage deadline, and failed-resource tolerance. It deliberately excludes
-addresses, endpoints, User-Agent, and commit hash.
-
-For a degraded lineage, search logs by `lineage.id`, then inspect
-`upstream acquisition failures summarized`. Each record groups terminal
-resources by `resource.type`, `failure.stage`, controlled `error.type` and
-`error.cause.type`, `http.response.status_code`, `retry.attempt`, and
-`retry.exhausted`; `failure.count` is the number in that group. A
-`thread acquisition exceeds remaining rate capacity` warning means even one
-attempt per queued thread cannot fit the remaining lineage deadline at the
-configured global rate.
-
-Publication failures add `publication.stage` and controlled `error.detail`.
-Snapshot failures add `snapshot.component` and the response status; `lineage.id`
-appears only after a valid active pointer was read. These diagnostics never
-contain board/thread identifiers, URLs, response values, cache keys, or raw
-transport/cache errors.
-
-`lineage.resource.failure.count` counts the grouped terminal acquisition
-failures with the same bounded dimensions but no lineage identifier.
-`lineage.failed_resource.count` remains the total failed wrappers in each
-activated lineage. Attribute-free `lineage.active.size` reports the last
-committed serialized snapshot size in bytes and is unchanged by failed
-publication.
+| Environment variable                                  | Default                | Purpose                                                                                       | Required |
+| ----------------------------------------------------- | ---------------------- | --------------------------------------------------------------------------------------------- | -------- |
+| `FOURVISOR_SERVER_ADDRESS`                            | `:65102`               | Backend HTTP listener.                                                                        | ❌       |
+| `FOURVISOR_MEMCACHED_ADDRESS`                         | required               | Memcached host and project port.                                                              | ❌       |
+| `FOURVISOR_OTLP_ENDPOINT`                             | `http://otelcol:65103` | OTLP/gRPC Collector URL.                                                                      | ❌       |
+| `FOURVISOR_ACQUISITION_RATE_INTERVAL`                 | `1s`                   | Minimum interval between outbound attempts; must be at least `1s`.                            | ❌       |
+| `FOURVISOR_ACQUISITION_MAX_CONCURRENCY`               | `10`                   | Process-wide outbound concurrency, from 1 through 10.                                         | ❌       |
+| `FOURVISOR_ACQUISITION_REQUEST_TIMEOUT`               | `5s`                   | Timeout for one outbound request attempt and response body.                                   | ❌       |
+| `FOURVISOR_ACQUISITION_MAX_RETRIES`                   | `2`                    | Retries after the initial attempt, from 0 through 2.                                          | ❌       |
+| `FOURVISOR_ACQUISITION_RETRY_BACKOFF`                 | `1s`                   | Base retry delay.                                                                             | ❌       |
+| `FOURVISOR_ACQUISITION_DEADLINE`                      | `4h`                   | Evidence-backed total acquisition deadline; operator overrides may use any positive duration. | ❌       |
+| `FOURVISOR_SYNCHRONIZATION_INTERVAL`                  | `4h`                   | Synchronization cadence in whole seconds, minimum `1s`.                                       | ❌       |
+| `FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE` | `10`                   | Failed-resource observability threshold.                                                      | ❌       |
+| `FOURVISOR_COMMIT_HASH`                               | n/a                    | Full lowercase 40-character deployed Git commit.                                              | ✔️       |
+| `GRAFANA_CLOUD_OTLP_ENDPOINT`                         | n/a                    | Grafana Cloud OTLP/HTTP base URL.                                                             | ✔️       |
+| `GRAFANA_CLOUD_INSTANCE_ID`                           | n/a                    | Grafana Cloud Basic Auth instance ID.                                                         | ✔️       |
+| `GRAFANA_CLOUD_API_KEY`                               | n/a                    | Grafana Cloud Basic Auth API key.                                                             | ✔️       |

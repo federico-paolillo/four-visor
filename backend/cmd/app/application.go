@@ -3,12 +3,10 @@ package main
 import (
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 
 	"git.disroot.org/federico-paolillo/four-visor.git/acquisition"
 	"git.disroot.org/federico-paolillo/four-visor.git/config"
-	"git.disroot.org/federico-paolillo/four-visor.git/health"
 	"git.disroot.org/federico-paolillo/four-visor.git/lineage"
 	"git.disroot.org/federico-paolillo/four-visor.git/synchronization"
 	"git.disroot.org/federico-paolillo/four-visor.git/telemetry"
@@ -22,8 +20,6 @@ type application struct {
 }
 
 func newApplication(cfg config.Config, providers *telemetry.Providers) (application, error) {
-	healthHandler := newHealthHandler(cfg, providers)
-
 	lineageTracer := providers.Tracer.Tracer("four-visor/lineage")
 	lineageMeter := providers.Meter.Meter("four-visor/lineage")
 
@@ -77,7 +73,6 @@ func newApplication(cfg config.Config, providers *telemetry.Providers) (applicat
 	logEffectivePolicy(providers.Slog, cfg)
 
 	mux := http.NewServeMux()
-	mux.Handle("/health", healthHandler)
 	mux.Handle("/snapshot", snapshotHandler)
 
 	handler, err := telemetry.HTTPHandler(mux, providers.Tracer, providers.Meter, otel.GetTextMapPropagator())
@@ -86,19 +81,6 @@ func newApplication(cfg config.Config, providers *telemetry.Providers) (applicat
 	}
 
 	return application{handler: handler, scheduler: scheduler}, nil
-}
-
-func newHealthHandler(cfg config.Config, providers *telemetry.Providers) http.Handler {
-	cache := health.NewMemcached(cfg.MemcachedAddress)
-	dns := health.NewDNS(cfg.DNSName, net.DefaultResolver)
-
-	return health.NewHandler(
-		cfg.HealthTimeout,
-		providers.Slog,
-		providers.Tracer.Tracer("four-visor/health"),
-		cache,
-		dns,
-	)
 }
 
 func logEffectivePolicy(logger *slog.Logger, cfg config.Config) {

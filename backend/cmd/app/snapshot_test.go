@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -48,6 +49,17 @@ func TestExecuteSnapshotWritesValidJSON(t *testing.T) {
 	}
 	if _, err := snapshot.Parse(data); err != nil {
 		t.Fatalf("snapshot.Parse() error = %v", err)
+	}
+}
+
+func TestExecuteRejectsInvalidCommands(t *testing.T) {
+	for _, args := range [][]string{
+		{"healthcheck", "http://127.0.0.1:65102/health"},
+		{"serve"},
+	} {
+		if err := execute(t.Context(), args, io.Discard, http.DefaultClient); !errors.Is(err, errInvalidCommand) {
+			t.Errorf("execute(%q) error = %v, want invalid command", args, err)
+		}
 	}
 }
 

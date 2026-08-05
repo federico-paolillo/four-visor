@@ -31,9 +31,7 @@ func TestApplicationRegistersOnlyInternalSnapshotRoute(t *testing.T) {
 		Slog:   slog.New(slog.NewJSONHandler(&logs, nil)),
 	}
 	application, err := newApplication(config.Config{
-		HealthTimeout:    time.Second,
 		MemcachedAddress: "127.0.0.1:65198",
-		DNSName:          "a.4cdn.org",
 		Acquisition: config.Acquisition{
 			RateInterval:   time.Second,
 			MaxConcurrency: 1,
@@ -80,7 +78,7 @@ func TestApplicationRegistersOnlyInternalSnapshotRoute(t *testing.T) {
 		t.Fatalf("POST /snapshot status=%d Allow=%q", response.Code, response.Header().Get("Allow"))
 	}
 
-	for _, path := range []string{"/api/snapshot", "/snapshot/", "/manifest", "/blocks/0", "/boards", "/threads/1"} {
+	for _, path := range []string{"/health", "/api/snapshot", "/snapshot/", "/manifest", "/blocks/0", "/boards", "/threads/1"} {
 		response = httptest.NewRecorder()
 		application.handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, http.NoBody))
 		if response.Code != http.StatusNotFound {

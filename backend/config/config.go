@@ -17,9 +17,7 @@ import (
 
 const (
 	serverAddressKey      = "FOURVISOR_SERVER_ADDRESS"
-	healthTimeoutKey      = "FOURVISOR_HEALTH_TIMEOUT"
 	memcachedAddressKey   = "FOURVISOR_MEMCACHED_ADDRESS"
-	dnsNameKey            = "FOURVISOR_DNS_NAME"
 	otlpEndpointKey       = "FOURVISOR_OTLP_ENDPOINT"
 	rateIntervalKey       = "FOURVISOR_ACQUISITION_RATE_INTERVAL"
 	maxConcurrencyKey     = "FOURVISOR_ACQUISITION_MAX_CONCURRENCY"
@@ -31,8 +29,6 @@ const (
 	failedToleranceKey    = "FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE"
 	commitHashKey         = "FOURVISOR_COMMIT_HASH"
 	defaultServerAddress  = ":65102"
-	defaultHealthTimeout  = 2 * time.Second
-	defaultDNSName        = "a.4cdn.org"
 	defaultOTLPEndpoint   = "http://otelcol:65103"
 	defaultRateInterval   = time.Second
 	defaultConcurrency    = 10
@@ -53,7 +49,6 @@ var (
 	errMissing         = errors.New("required setting is missing")
 	errInvalidAddress  = errors.New("invalid network address")
 	errInvalidDuration = errors.New("invalid duration")
-	errInvalidDNSName  = errors.New("invalid DNS name")
 	errInvalidInteger  = errors.New("invalid integer")
 	errInvalidCommit   = errors.New("invalid commit hash")
 )
@@ -78,9 +73,7 @@ type Synchronization struct {
 // Config contains the settings required by the backend.
 type Config struct {
 	ServerAddress    string
-	HealthTimeout    time.Duration
 	MemcachedAddress string
-	DNSName          string
 	OTLPEndpoint     string
 	Acquisition      Acquisition
 	Synchronization  Synchronization
@@ -112,11 +105,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 
-	healthTimeout, err := duration(healthTimeoutKey, defaultHealthTimeout)
-	if err != nil {
-		return Config{}, err
-	}
-
 	memcachedAddress := os.Getenv(memcachedAddressKey)
 	if memcachedAddress == "" {
 		return Config{}, configError(memcachedAddressKey, "is required", errMissing)
@@ -125,11 +113,6 @@ func Load() (Config, error) {
 	err = validateAddress(memcachedAddressKey, memcachedAddress, true, false)
 	if err != nil {
 		return Config{}, err
-	}
-
-	dnsName := valueOrDefault(dnsNameKey, defaultDNSName)
-	if !validDNSName(dnsName) {
-		return Config{}, configError(dnsNameKey, "must be a valid DNS name", errInvalidDNSName)
 	}
 
 	otlpEndpoint := valueOrDefault(otlpEndpointKey, defaultOTLPEndpoint)
@@ -151,9 +134,7 @@ func Load() (Config, error) {
 
 	return Config{
 		ServerAddress:    serverAddress,
-		HealthTimeout:    healthTimeout,
 		MemcachedAddress: memcachedAddress,
-		DNSName:          dnsName,
 		OTLPEndpoint:     otlpEndpoint,
 		Acquisition:      acquisition,
 		Synchronization:  synchronization,
@@ -367,39 +348,6 @@ func validateOTLPPort(endpoint *url.URL) error {
 	}
 
 	return nil
-}
-
-func validDNSName(name string) bool {
-	if len(name) == 0 || len(name) > 253 || strings.HasSuffix(name, ".") {
-		return false
-	}
-
-	for label := range strings.SplitSeq(name, ".") {
-		if !validDNSLabel(label) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func validDNSLabel(label string) bool {
-	if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
-		return false
-	}
-
-	for _, character := range label {
-		if !validDNSCharacter(character) {
-			return false
-		}
-	}
-
-	return true
-}
-
-func validDNSCharacter(character rune) bool {
-	return character == '-' || character >= '0' && character <= '9' ||
-		character >= 'A' && character <= 'Z' || character >= 'a' && character <= 'z'
 }
 
 func configError(key, kind string, cause error) error {

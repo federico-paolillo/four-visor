@@ -37,8 +37,6 @@ services:
     environment:
       - FOURVISOR_MEMCACHED_ADDRESS=memcached:65100
       - FOURVISOR_COMMIT_HASH=${FOURVISOR_COMMIT_HASH:?FOURVISOR_COMMIT_HASH is required}
-      - FOURVISOR_HEALTH_TIMEOUT
-      - FOURVISOR_DNS_NAME
       - FOURVISOR_OTLP_ENDPOINT
       - FOURVISOR_ACQUISITION_RATE_INTERVAL
       - FOURVISOR_ACQUISITION_MAX_CONCURRENCY
@@ -48,12 +46,6 @@ services:
       - FOURVISOR_ACQUISITION_DEADLINE
       - FOURVISOR_SYNCHRONIZATION_INTERVAL
       - FOURVISOR_SYNCHRONIZATION_FAILED_RESOURCE_TOLERANCE
-    healthcheck:
-      test: ["CMD", "/usr/bin/four-visor", "healthcheck", "http://127.0.0.1:65102/health"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 5s
     networks:
       - app
       - cache

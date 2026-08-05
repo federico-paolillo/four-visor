@@ -34,7 +34,7 @@ func TestMetricViewDropsUnknownAndWrongKindMetricsAndFiltersAttributes(t *testin
 
 	attributes := metric.WithAttributes(
 		attribute.String("http.request.method", "GET"),
-		attribute.String("http.route", "/health"),
+		attribute.String("http.route", "/snapshot"),
 		attribute.Int(httpResponseStatusCodeKey, 200),
 		attribute.String("forbidden.attribute", "secret-value"),
 	)
