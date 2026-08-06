@@ -53,3 +53,14 @@ using a [design document](docs/SEED.md).
 | `GRAFANA_CLOUD_OTLP_ENDPOINT`                         | n/a                    | Grafana Cloud OTLP/HTTP base URL.                                                             | ✔️       |
 | `GRAFANA_CLOUD_INSTANCE_ID`                           | n/a                    | Grafana Cloud Basic Auth instance ID.                                                         | ✔️       |
 | `GRAFANA_CLOUD_API_KEY`                               | n/a                    | Grafana Cloud Basic Auth API key.                                                             | ✔️       |
+
+## Snapshot delivery
+
+The repository edge streams the validated backend snapshot without imposing a
+response timeout. The VPS Caddy must likewise avoid a response timeout shorter
+than snapshot preparation and transfer.
+
+The stock Caddy image used here has no Brotli encoder. Keep the backend and
+repository edge response uncompressed and apply Brotli once at the VPS Caddy.
+If the acquisition deadline is raised above four hours, keep the Collector's
+tail-sampling decision wait longer than the complete synchronization.

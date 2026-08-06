@@ -123,7 +123,7 @@ func (client *Client) fetchThread(
 					attribute.Int("posts.limit", snapshot.MaximumThreadPosts),
 				}
 				trace.SpanFromContext(attemptCtx).SetAttributes(attributes...)
-				client.logger.WarnContext(attemptCtx, "oversized thread detected",
+				client.logger.DebugContext(attemptCtx, "oversized thread detected",
 					slog.String("lineage.id", lineageID),
 					slog.String("resource.type", threadResource),
 					slog.String("resource.state", string(snapshot.StateOversize)),

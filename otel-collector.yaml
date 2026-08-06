@@ -17,11 +17,17 @@ processors:
     spike_limit_mib: 64
   tail_sampling:
     sampling_strategy: trace-complete
-    decision_wait: 40m
+    decision_wait: 5h
     decision_wait_after_root_received: 10s
     num_traces: 5000
     expected_new_traces_per_sec: 2
     policies:
+      - name: retain-synchronizations
+        type: ottl_condition
+        ottl_condition:
+          error_mode: ignore
+          span:
+            - name == "lineage.synchronize"
       - name: retain-errors
         type: status_code
         status_code:

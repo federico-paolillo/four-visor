@@ -47,7 +47,7 @@ func newFailureSummary(lineageID string, logger *slog.Logger, counter metric.Int
 	}
 }
 
-func (summary *failureSummary) add(resource string, err error) {
+func (summary *failureSummary) add(resource string, err error) failureKey {
 	var failure *requestError
 	if !errors.As(err, &failure) {
 		failure = &requestError{kind: "unknown", cause: err, stage: stageRequest}
@@ -63,6 +63,22 @@ func (summary *failureSummary) add(resource string, err error) {
 		exhausted: failure.exhausted,
 	}
 	summary.counts[key]++
+
+	return key
+}
+
+func (summary *failureSummary) addFetch(ctx context.Context, resource string, err error) {
+	key := summary.add(resource, err)
+	summary.logger.WarnContext(ctx, "upstream acquisition failed",
+		slog.String("lineage.id", summary.lineageID),
+		slog.String("resource.type", key.resource),
+		slog.String("failure.stage", key.stage),
+		slog.String("error.type", key.errorType),
+		slog.String("error.cause.type", key.causeType),
+		slog.Int("http.response.status_code", key.status),
+		slog.Int("retry.attempt", key.attempt),
+		slog.Bool("retry.exhausted", key.exhausted),
+	)
 }
 
 func (summary *failureSummary) addCount(resource string, failure *requestError, count int) {

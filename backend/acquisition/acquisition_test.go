@@ -140,10 +140,7 @@ func TestAcquisitionTelemetryIsBoundedAndSecretFree(t *testing.T) {
 
 		assertAcquisitionSpans(t, spanExporter.GetSpans(), root.SpanContext())
 		assertAcquisitionMetrics(t, reader, 1)
-		if strings.Count(strings.TrimSpace(logs.String()), "\n") != 0 || strings.TrimSpace(logs.String()) == "" {
-			t.Fatalf("terminal log count != 1: %q", logs.String())
-		}
-		assertTerminalLog(t, logs.Bytes())
+		assertTerminalLogs(t, logs.Bytes())
 		for _, forbidden := range []string{boardID, responseSecret, transportSecret, "example.test", "/catalog.json"} {
 			if strings.Contains(logs.String(), forbidden) {
 				t.Fatalf("log disclosed %q: %s", forbidden, logs.String())
@@ -183,12 +180,14 @@ func TestTerminalFailuresAggregatePerLineage(t *testing.T) {
 		if err != nil || boards.FailedResourceCount() != 3 {
 			t.Fatalf("Observe() = %#v, %v", boards, err)
 		}
-		if count := strings.Count(strings.TrimSpace(logs.String()), "\n") + 1; count != 1 {
-			t.Fatalf("aggregate log count = %d: %s", count, logs.String())
+		if count := strings.Count(strings.TrimSpace(logs.String()), "\n") + 1; count != 4 ||
+			strings.Count(logs.String(), `"msg":"upstream acquisition failed"`) != 3 {
+			t.Fatalf("terminal log count = %d: %s", count, logs.String())
 		}
 
+		lines := bytes.Split(bytes.TrimSpace(logs.Bytes()), []byte{'\n'})
 		var record map[string]any
-		if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		if err := json.Unmarshal(lines[len(lines)-1], &record); err != nil {
 			t.Fatalf("decode aggregate log: %v", err)
 		}
 		if record["failure.count"] != float64(3) || record["resource.type"] != catalogResource ||
@@ -203,6 +202,127 @@ func TestTerminalFailuresAggregatePerLineage(t *testing.T) {
 				t.Fatalf("aggregate disclosed %q: %s", forbidden, logs.String())
 			}
 		}
+	})
+}
+
+func TestTerminalFetchWarningCardinality(t *testing.T) {
+	t.Run("boards failure", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var logs bytes.Buffer
+			const responseSecret = "boards-response-must-not-leak"
+			transport := roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return response(http.StatusServiceUnavailable, responseSecret, nil), nil
+			})
+			policy := defaultPolicy()
+			policy.MaxRetries = 0
+			client := fakeClient(t, policy, transport, &logs, nil, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+			defer cancel()
+
+			boards, err := client.Observe(ctx, testLineageID)
+			if err != nil || boards.State != snapshot.StateFailed {
+				t.Fatalf("Observe() = %#v, %v", boards, err)
+			}
+			if strings.Count(logs.String(), `"msg":"upstream acquisition failed"`) != 1 ||
+				strings.Count(logs.String(), `"msg":"upstream acquisition failures summarized"`) != 1 ||
+				!strings.Contains(logs.String(), `"resource.type":"boards"`) ||
+				strings.Contains(logs.String(), responseSecret) {
+				t.Fatalf("boards failure logs = %s", logs.String())
+			}
+		})
+	})
+
+	t.Run("thread failure", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var logs bytes.Buffer
+			const boardID = "thread-board-must-not-leak"
+			const threadID = "424242"
+			const responseSecret = "thread-response-must-not-leak"
+			var threadCalls atomic.Int64
+			transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				switch request.URL.Path {
+				case "/boards.json":
+					return response(http.StatusOK, `{"boards":[{"board":"`+boardID+`"}]}`, nil), nil
+				case "/" + boardID + "/catalog.json":
+					return response(http.StatusOK, `[{"page":1,"threads":[{"no":`+threadID+`}]}]`, nil), nil
+				case "/" + boardID + "/thread/" + threadID + ".json":
+					threadCalls.Add(1)
+
+					return response(http.StatusNotFound, responseSecret, nil), nil
+				default:
+					t.Fatalf("unexpected request path %q", request.URL.Path)
+
+					return nil, nil
+				}
+			})
+			policy := defaultPolicy()
+			policy.MaxRetries = 0
+			client := fakeClient(t, policy, transport, &logs, nil, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+			defer cancel()
+
+			boards, err := client.Observe(ctx, testLineageID)
+			if err != nil || boards.FailedResourceCount() != 1 || threadCalls.Load() != 1 {
+				t.Fatalf("Observe() = %#v, %v failures=%d calls=%d",
+					boards, err, boards.FailedResourceCount(), threadCalls.Load())
+			}
+			if strings.Count(logs.String(), `"msg":"upstream acquisition failed"`) != 1 ||
+				strings.Count(logs.String(), `"msg":"upstream acquisition failures summarized"`) != 1 ||
+				!strings.Contains(logs.String(), `"resource.type":"thread"`) ||
+				!strings.Contains(logs.String(), `"http.response.status_code":404`) {
+				t.Fatalf("thread failure logs = %s", logs.String())
+			}
+			for _, forbidden := range []string{boardID, threadID, responseSecret, "/thread/"} {
+				if strings.Contains(logs.String(), forbidden) {
+					t.Fatalf("thread failure log disclosed %q: %s", forbidden, logs.String())
+				}
+			}
+		})
+	})
+
+	t.Run("malformed summary is aggregate only", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			var logs bytes.Buffer
+			const boardID = "malformed-board-must-not-leak"
+			const summarySecret = "malformed-summary-must-not-leak"
+			var threadCalls atomic.Int64
+			transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				switch request.URL.Path {
+				case "/boards.json":
+					return response(http.StatusOK, `{"boards":[{"board":"`+boardID+`"}]}`, nil), nil
+				case "/" + boardID + "/catalog.json":
+					return response(http.StatusOK,
+						`[{"page":1,"threads":[{"marker":"`+summarySecret+`"}]}]`, nil), nil
+				default:
+					threadCalls.Add(1)
+
+					return response(http.StatusInternalServerError, "must not be called", nil), nil
+				}
+			})
+			policy := defaultPolicy()
+			policy.MaxRetries = 0
+			client := fakeClient(t, policy, transport, &logs, nil, nil)
+			ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
+			defer cancel()
+
+			boards, err := client.Observe(ctx, testLineageID)
+			if err != nil || boards.FailedResourceCount() != 1 || threadCalls.Load() != 0 {
+				t.Fatalf("Observe() = %#v, %v failures=%d calls=%d",
+					boards, err, boards.FailedResourceCount(), threadCalls.Load())
+			}
+			if strings.Contains(logs.String(), `"msg":"upstream acquisition failed"`) ||
+				strings.Count(logs.String(), `"msg":"upstream acquisition failures summarized"`) != 1 ||
+				!strings.Contains(logs.String(), `"resource.type":"thread"`) ||
+				!strings.Contains(logs.String(), `"failure.stage":"decode"`) ||
+				!strings.Contains(logs.String(), `"failure.count":1`) {
+				t.Fatalf("malformed summary logs = %s", logs.String())
+			}
+			for _, forbidden := range []string{boardID, summarySecret, "must not be called"} {
+				if strings.Contains(logs.String(), forbidden) {
+					t.Fatalf("malformed summary log disclosed %q: %s", forbidden, logs.String())
+				}
+			}
+		})
 	})
 }
 
@@ -645,6 +765,7 @@ func TestThreadOversizeTelemetryIsBoundedAndSecretFree(t *testing.T) {
 			tracerProvider.Tracer("test/acquisition"),
 			meterProvider.Meter("test/acquisition"),
 		)
+		client.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 		ctx, cancel := context.WithTimeout(t.Context(), time.Hour)
 		defer cancel()
 		ctx, root := tracerProvider.Tracer("test/root").Start(ctx, "lineage.sync")
@@ -672,6 +793,7 @@ func TestThreadOversizeTelemetryIsBoundedAndSecretFree(t *testing.T) {
 			t.Fatal("fetch.thread span not found")
 		}
 		if strings.Count(strings.TrimSpace(logs.String()), "\n") != 0 ||
+			!strings.Contains(logs.String(), `"level":"DEBUG"`) ||
 			!strings.Contains(logs.String(), "oversized thread detected") {
 			t.Fatalf("oversize logs = %q", logs.String())
 		}
@@ -740,21 +862,36 @@ func assertAcquisitionSpans(t *testing.T, spans tracetest.SpanStubs, root trace.
 	}
 }
 
-func assertTerminalLog(t *testing.T, data []byte) {
+func assertTerminalLogs(t *testing.T, data []byte) {
 	t.Helper()
-	var record map[string]any
-	if err := json.Unmarshal(data, &record); err != nil {
-		t.Fatalf("decode terminal log: %v", err)
+	lines := bytes.Split(bytes.TrimSpace(data), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("terminal log count = %d: %s", len(lines), data)
 	}
-	if record["resource.type"] != catalogResource || record["error.type"] != errorNetwork ||
-		record["error.cause.type"] != causeNetwork || record["failure.stage"] != stageRequest ||
-		record["http.response.status_code"] != float64(0) || record["retry.attempt"] != float64(1) ||
-		record["retry.exhausted"] != true || record["failure.count"] != float64(1) ||
-		record["lineage.id"] != testLineageID {
-		t.Fatalf("terminal log fields = %#v", record)
-	}
-	if _, exists := record["error"]; exists {
-		t.Fatalf("terminal log exported uncontrolled error value: %#v", record)
+
+	for index, line := range lines {
+		var record map[string]any
+		if err := json.Unmarshal(line, &record); err != nil {
+			t.Fatalf("decode terminal log: %v", err)
+		}
+		if record["resource.type"] != catalogResource || record["error.type"] != errorNetwork ||
+			record["error.cause.type"] != causeNetwork || record["failure.stage"] != stageRequest ||
+			record["http.response.status_code"] != float64(0) || record["retry.attempt"] != float64(1) ||
+			record["retry.exhausted"] != true || record["lineage.id"] != testLineageID {
+			t.Fatalf("terminal log fields = %#v", record)
+		}
+		if _, exists := record["error"]; exists {
+			t.Fatalf("terminal log exported uncontrolled error value: %#v", record)
+		}
+
+		if index == 0 && (record["level"] != "WARN" || record["msg"] != "upstream acquisition failed" ||
+			record["failure.count"] != nil) {
+			t.Fatalf("individual warning = %#v", record)
+		}
+		if index == 1 && (record["level"] != "ERROR" ||
+			record["msg"] != "upstream acquisition failures summarized" || record["failure.count"] != float64(1)) {
+			t.Fatalf("aggregate error = %#v", record)
+		}
 	}
 }
 

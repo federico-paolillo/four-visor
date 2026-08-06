@@ -16,6 +16,7 @@ var retainedLogMessages = map[string]struct{}{
 	"synchronization tick skipped":                       {},
 	"effective backend policy configured":                {},
 	"thread acquisition exceeds remaining rate capacity": {},
+	"upstream acquisition failed":                        {},
 }
 
 var retainedLogAttributes = map[string]struct{}{

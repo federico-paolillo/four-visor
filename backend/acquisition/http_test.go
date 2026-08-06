@@ -346,6 +346,7 @@ func TestBoundedThreadWorkersPreserveCatalogOrder(t *testing.T) {
 func TestThreadDeadlineFailsInFlightAndUndispatched(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		var threadCalls atomic.Int64
+		var logs bytes.Buffer
 		transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
 			switch request.URL.Path {
 			case "/boards.json":
@@ -362,7 +363,7 @@ func TestThreadDeadlineFailsInFlightAndUndispatched(t *testing.T) {
 		policy := defaultPolicy()
 		policy.MaxConcurrency = 1
 		policy.MaxRetries = 0
-		client := fakeClient(t, policy, transport, io.Discard, nil, nil)
+		client := fakeClient(t, policy, transport, &logs, nil, nil)
 		ctx, cancel := context.WithTimeout(t.Context(), 2500*time.Millisecond)
 		defer cancel()
 
@@ -375,6 +376,9 @@ func TestThreadDeadlineFailsInFlightAndUndispatched(t *testing.T) {
 			if entry.Thread == nil || entry.Thread.State != snapshot.StateFailed || entry.Thread.Posts != nil {
 				t.Fatalf("thread %d = %#v", index, entry.Thread)
 			}
+		}
+		if got := strings.Count(logs.String(), `"msg":"upstream acquisition failed"`); got != 1 {
+			t.Fatalf("individual fetch warnings = %d, want 1: %s", got, logs.String())
 		}
 	})
 }

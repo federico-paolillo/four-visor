@@ -17,6 +17,7 @@ http://:65199 {
 	handle_path /api/* {
 		reverse_proxy backend:65102 {
 			header_up Accept-Encoding identity
+			flush_interval -1
 		}
 	}
 

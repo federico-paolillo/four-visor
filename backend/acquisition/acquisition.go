@@ -61,11 +61,12 @@ type clientMetrics struct {
 }
 
 type threadJob struct {
-	board  string
-	number uint64
-	entry  *snapshot.ThreadEntry
-	thread snapshot.Thread
-	err    error
+	board   string
+	number  uint64
+	entry   *snapshot.ThreadEntry
+	thread  snapshot.Thread
+	fetched bool
+	err     error
 }
 
 // New creates a production client for the official 4chan API.
@@ -176,7 +177,7 @@ func (client *Client) Observe(ctx context.Context, lineageID string) (snapshot.B
 			return snapshot.Boards{}, cancellation
 		}
 
-		failures.add(boardsResource, err)
+		failures.addFetch(ctx, boardsResource, err)
 
 		return snapshot.Boards{State: snapshot.StateFailed}, nil
 	}
@@ -215,7 +216,7 @@ func (client *Client) Observe(ctx context.Context, lineageID string) (snapshot.B
 
 		items[index].Catalog = &snapshot.Catalog{State: snapshot.StateFailed}
 
-		failures.add(catalogResource, failure)
+		failures.addFetch(ctx, catalogResource, failure)
 	}
 
 	jobs := collectThreadJobs(boards, items)
@@ -227,7 +228,7 @@ func (client *Client) Observe(ctx context.Context, lineageID string) (snapshot.B
 		return snapshot.Boards{}, cancellation
 	}
 
-	client.applyThreadResults(jobs, failures)
+	client.applyThreadResults(ctx, jobs, failures)
 
 	return snapshot.Boards{State: snapshot.StatePresent, Items: &items}, nil
 }
@@ -244,7 +245,7 @@ func validateObservation(ctx context.Context, lineageID string) error {
 	return nil
 }
 
-func (client *Client) applyThreadResults(jobs []threadJob, failures *failureSummary) {
+func (client *Client) applyThreadResults(ctx context.Context, jobs []threadJob, failures *failureSummary) {
 	unfinished := 0
 
 	for index := range jobs {
@@ -262,7 +263,11 @@ func (client *Client) applyThreadResults(jobs []threadJob, failures *failureSumm
 			continue
 		}
 
-		failures.add(threadResource, job.err)
+		if job.fetched {
+			failures.addFetch(ctx, threadResource, job.err)
+		} else {
+			failures.add(threadResource, job.err)
+		}
 	}
 
 	failures.addCount(threadResource, lineageDeadlineFailure(stageQueue), unfinished)
@@ -313,6 +318,7 @@ func (client *Client) acquireThreads(ctx context.Context, lineageID string, jobs
 					return
 				}
 
+				job.fetched = true
 				job.thread, job.err = client.fetchThread(ctx, lineageID, job.board, job.number)
 			}
 		})

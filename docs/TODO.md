@@ -35,3 +35,4 @@
 - [x] US-018 Retain failed traces and a sample of successful operation
 - [x] US-019 Export a complete snapshot from the CLI
 - [x] US-020 Make production acquisition failures diagnosable
+- [x] US-021 Harden production synchronization and snapshot delivery

@@ -66,7 +66,7 @@ services:
         "memcached",
         "--listen=0.0.0.0",
         "--port=65100",
-        "--memory-limit=1024",
+        "--memory-limit=2048",
         "--max-item-size=1m",
         "--disable-evictions",
       ]
