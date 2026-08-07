@@ -23,7 +23,7 @@ legitimate specification omission.
 ## Summary
 
 The autonomous implementation generally followed its inputs correctly. Most
-subsequent work came from four defects in those inputs:
+subsequent work came from five defects in those inputs:
 
 1. Numeric requirements were specified independently without a workload or
    capacity model.
@@ -33,6 +33,11 @@ subsequent work came from four defects in those inputs:
    validation, documentation, release automation, or dependency ownership.
 4. Later requirement changes bypassed the declared authority of the SEED,
    leaving the current generated artifacts inconsistent with the implementation.
+5. Worker and Reviewer instructions rewarded exhaustive proof without requiring
+   proportionality, a single enforcement owner, or a stopping rule. This led to
+   tests for incidental log prose, repeated checks of the same invariant at
+   several layers, bespoke smoke-like scripts, and comments that narrated
+   obvious modules while non-obvious mechanisms remained unexplained.
 
 The central remediation is to make the SEED quantitatively closed and to make
 decomposition prove feasibility, cross-layer consistency, and operability before
@@ -280,6 +285,42 @@ Add:
 This closes the ambiguity that produced large custom image, Compose, and
 Collector validation systems which were later removed.
 
+### 9. Require proportional verification and one policy owner
+
+Add a testing and enforcement principle:
+
+```markdown
+- Test each behavior once at the lowest stable boundary that can prove it.
+- Add a cross-boundary integration test only for behavior that can fail despite
+  the lower-level test, such as serialization compatibility, dependency
+  semantics, or framework wiring.
+- Do not reproduce the same assertion in unit, integration, image, Compose,
+  smoke-like script, and documentation checks merely as additional assurance.
+- Negative-path coverage is required for trust boundaries, security rules,
+  cancellation and concurrency, atomic data replacement, data-loss risks, and
+  previously observed regressions. It is not required for every branch or log
+  call.
+- Log prose is not an API. Test exact text only when the text is itself a stable
+  filtering or operator contract. Otherwise test severity, event identity,
+  required fields, forbidden sensitive fields, and cardinality using one
+  representative event per policy class.
+- Each filtering, validation, and normalization policy has one authoritative
+  enforcement layer. A second layer is allowed only for a distinct trust
+  boundary or independently stated failure mode.
+- Source-side telemetry filtering owns secrets, cardinality, and the application
+  event catalogue. The Collector owns routing, batching, authentication, and
+  trace sampling; it does not duplicate the application's field allowlists as a
+  second failsafe.
+- Test volume, branch count, mutation survival, and number of assertions are not
+  goals. Stop when the acceptance criterion and material regression risks are
+  proved.
+```
+
+For example, an OTLP policy needs one focused catalogue/filter test plus the
+smallest representative producer check. It does not need every log-emitting call
+to assert its complete string and attributes, followed by another Collector
+filter suite and a full-stack capture script.
+
 ## Initial Template Remediation
 
 ### 1. Make the starter repository executable before decomposition
@@ -327,6 +368,19 @@ All coordinator, decomposition, and ignore-file instructions must agree.
 - Never require `sudo`, privileged containers, firewall changes, or a shared
   prestarted dependency.
 
+Worker and Reviewer guidance must also state:
+
+- do not add a test solely to exercise every line, branch, log message, or
+  defensive condition;
+- reuse an existing test at the owning boundary instead of adding the same
+  regression at every consumer;
+- do not introduce a test seam, interface, fake, fixture family, or helper whose
+  complexity exceeds the behavior it verifies;
+- prefer deleting redundant checks when a stronger authoritative check already
+  exists;
+- validation ends when the story's observable acceptance criteria and material
+  risks are covered.
+
 ### 4. Include CI; conditionally generate CD
 
 The reusable template should contain minimal CI that runs `mise run verify` from
@@ -347,6 +401,30 @@ specification reversal directly against stale generated artifacts.
 ```
 
 Generated artifacts can be replaced. They must never silently override SEED.
+
+### 6. Replace mandatory comments with a why-only policy
+
+Remove the template rule requiring one comment for every module. It produces
+comments such as “this module renders” or “this module owns” that restate names
+without helping a maintainer.
+
+Replace it with:
+
+```markdown
+Comment only information that cannot be recovered quickly from the code:
+non-obvious invariants, security or compatibility constraints, protocol
+ownership, calibrated limits, and why a simpler-looking implementation is
+incorrect. Do not require file, module, function, or test comments merely for
+coverage. Prefer a precise comment beside the constrained mechanism over a long
+README explanation.
+```
+
+The Service Worker shell hash is the representative missed case. Its useful
+comment should explain that paths and bytes are sorted and length-framed before
+hashing so the cache name is deterministic, changes when any shell byte changes,
+and cannot collide through ambiguous concatenation. A generic comment saying
+that the file “injects its exact shell precache contract” does not preserve that
+reasoning.
 
 ## Decomposition Prompt Remediation
 
@@ -425,6 +503,16 @@ Review what each proposed validation actually does, not its label.
 - Reject integration tests that depend on a shared Compose stack or fixed port.
 - Reject documentation criteria without a named audience and destination.
 - Reject acceptance criteria that cannot fail when the named behavior regresses.
+- Reject duplicate tests of the same rule unless each test names a distinct
+  failure mode unavailable at the other boundary.
+- Reject exact log-line assertions unless the wording is an explicit operator or
+  filtering contract.
+- Reject duplicated application and Collector filtering unless they protect
+  distinct trust boundaries.
+- Reject reviewer findings whose only justification is untested code rather than
+  an uncovered acceptance criterion or material regression risk.
+- Require deletion or consolidation when a new authoritative check makes an old
+  helper, fixture, script, or test redundant.
 
 ### Phase 6: Operability review
 
@@ -439,6 +527,10 @@ Before finalizing generated artifacts, the independent reviewer must answer:
 6. Are CI, release, and deployment consumption intentionally present or absent?
 7. Do generated MADRs contain only genuine decisions left open by the SEED?
 8. Does every generated story introduce a complete, currently operable slice?
+9. Is each important rule enforced and tested at one clearly named owning
+   boundary?
+10. Does documentation explain the non-obvious reasons and omit narration that
+    is already evident from names and control flow?
 
 ## Expected Story Allocation
 
@@ -480,6 +572,9 @@ durable inputs:
   behavior to a later cleanup story;
 - no story invents a production constant without a requirement, formula, or
   calibration step;
+- no story demands exhaustive branch, log-line, or implementation-detail tests;
+- every repeated test or enforcement layer identifies a distinct failure or
+  trust boundary;
 - all dependencies point backward in the implementation order;
 - the final generated plan includes template validation, production-budget
   validation, and release work when required;
@@ -508,7 +603,10 @@ The remediation succeeds when a clean run from the revised SEED and template:
 - does not require later diagnosability or production-hardening stories;
 - selects feasible linked time, memory, transfer, and telemetry budgets;
 - produces self-contained tests without bespoke deployment-validation systems;
+- verifies each rule proportionally at one authoritative boundary rather than
+  accumulating duplicate failsafes;
 - keeps README concise;
+- documents non-obvious invariants instead of requiring ceremonial comments;
 - includes the intended CI/CD path;
 - and reaches the intended generated outcome without manual scope, logging,
   capacity, timeout, or delivery corrections.
