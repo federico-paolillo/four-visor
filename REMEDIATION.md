@@ -54,6 +54,12 @@ behavior without later corrective stories:
   capacity for active and incoming lineages to coexist;
 - snapshot responses have no fixed absolute backend write deadline and are
   streamed by the repository edge;
+- a dedicated Web Worker owns snapshot download, incremental decoding,
+  validation, and staging directly into IndexedDB;
+- the window never materializes or receives a complete serialized lineage or
+  complete decoded snapshot object graph;
+- snapshot transport is stream-decodable and storage-aligned rather than one
+  monolithic JSON document;
 - snapshot compression is applied exactly once by the VPS ingress, not by the
   backend or repository edge;
 - the Collector keeps its sampling decision open for five hours;
@@ -334,6 +340,122 @@ smallest representative producer check. It does not need every log-emitting call
 to assert its complete string and attributes, followed by another Collector
 filter suite and a full-stack capture script.
 
+### 10. Require off-main-thread, bounded-memory snapshot ingestion
+
+The original SEED said the PWA downloaded, parsed, validated, and stored a
+complete lineage but did not constrain which execution context performed the
+work or how memory scaled with lineage size. Add:
+
+```markdown
+## Browser snapshot ingestion
+
+- A dedicated Web Worker owns snapshot fetching, incremental decoding, contract
+  validation, digest calculation, and staging into IndexedDB.
+- The window communicates only synchronization commands, cancellation, bounded
+  progress, controlled failures, and activation metadata for the import path.
+- The window never receives the complete response body, a complete serialized
+  lineage, or a complete decoded lineage object graph through postMessage.
+- The Worker consumes the Fetch response stream incrementally and writes
+  bounded batches directly to an incoming lineage namespace in IndexedDB.
+- If bytes cross a Worker boundary, transfer ArrayBuffer ownership rather than
+  cloning the buffer.
+- Working memory used for download, decode, validation, and staging is bounded
+  independently of total lineage size. A representative production-size run
+  records peak Worker and window memory before the browser target is accepted;
+  this is calibration evidence, not a permanent browser smoke-test suite.
+- Cancellation, network failure, decode failure, schema failure, digest
+  mismatch, transaction failure, and quota exhaustion preserve the active
+  lineage and discard the incoming namespace.
+- Only after all expected records and final integrity metadata validate does one
+  short IndexedDB transaction switch the active-lineage pointer. Cleanup occurs
+  after activation and never exposes a partially imported lineage.
+```
+
+Dedicated Workers can use both Fetch and IndexedDB. Moving the current
+`response.text()` and whole-document parse into a Worker would prevent main
+thread jank but would not satisfy the bounded-memory requirement; the Worker
+would still materialize the complete text and decoded object graph. Incremental
+transport framing and incremental storage are therefore part of the same
+requirement.
+
+The active read path must also remain bounded. Loading the complete lineage from
+IndexedDB into the window at startup would recreate the same memory and latency
+problem after a successful import. Add:
+
+```markdown
+- Startup loads only active-lineage metadata and the records required for the
+  initial view.
+- Board, catalog, thread, and post records are queried on demand from IndexedDB
+  in stored order.
+- The window may query bounded records directly from IndexedDB or through a
+  Worker, but no message or query reconstructs the entire lineage in memory.
+```
+
+### 11. Replace the monolithic JSON lock with a deliberate transport contract
+
+The original SEED explicitly selected one nested JSON document, stated that
+binary serialization was unnecessary, and deferred binary formats. Those
+statements must be removed to permit a compact streaming design.
+
+If the desired architecture specifically requires Protobuf, lock it directly in
+the SEED rather than expecting a MADR to choose it:
+
+```markdown
+## Snapshot transport format
+
+- Snapshot transport uses a versioned, length-delimited Protobuf stream rather
+  than one monolithic JSON document or one monolithic Protobuf message.
+- Frames are independently decodable and align with IndexedDB lineage metadata,
+  board, catalog, thread, and post records.
+- A header identifies schema version, lineage, expected record counts, and
+  integrity metadata. A terminal frame allows the Worker to verify completeness
+  before activation.
+- Backend lineage publication stores or can emit transport-ready frames without
+  reconstructing one complete in-memory snapshot solely for HTTP serving.
+- The browser validates every frame and the complete lineage contract before
+  switching the active pointer.
+- Transport compression remains standard Brotli at the VPS ingress and is
+  measured separately from the uncompressed binary representation.
+- Backend and browser implementations share one small compatibility fixture set
+  covering representative ordering and opaque data, plus one schema mismatch
+  and one truncated/integrity failure. Do not create exhaustive frame-permutation
+  suites when those cases exercise the same decoder boundary.
+```
+
+One large Protobuf message is not sufficient: it can still require whole-message
+buffering and decoding. Length-delimited records are what provide streaming and
+bounded-memory behavior.
+
+If compact format choice should remain open, use an outcome-based requirement
+instead:
+
+```markdown
+- Decomposition creates one MADR selecting the snapshot transfer encoding from
+  measured candidates, including Brotli-compressed JSON, a framed textual
+  representation, CBOR or MessagePack, and length-delimited Protobuf.
+- The decision compares on-wire bytes, uncompressed bytes, backend encoding
+  cost, Worker peak memory, window peak memory, IndexedDB bytes, incremental
+  validation, selected-record read cost, opaque-field fidelity, schema
+  evolution, browser support, and dependency complexity.
+- Monolithic JSON is acceptable only if it meets the same production-size
+  memory, responsiveness, and storage budgets; simplicity alone is not proof.
+```
+
+Protobuf is not automatically the smallest practical answer. Brotli compresses
+repeated JSON keys well, and the snapshot contract deliberately preserves opaque
+upstream objects that do not naturally fit a rigid schema. A Protobuf design may
+need typed fields for stable snapshot structure plus raw JSON bytes or another
+canonical representation for opaque upstream values. Measure the actual
+representative lineage before locking that tradeoff.
+
+The observed approximately 800 MiB capacity requirement represents two
+overlapping lineages, not one 800 MiB HTTP body. Measured individual snapshots
+were approximately 416–419 MiB as uncompressed JSON, and Brotli reduces their
+on-wire size. The browser problem remains material because the current path can
+hold decoded transport bytes, a JavaScript string, parsed objects, encoded
+records, and view state at different stages. Compare compressed wire size,
+uncompressed bytes, peak heap, and stored size separately.
+
 ## Initial Template Remediation
 
 ### 1. Make the starter repository executable before decomposition
@@ -468,6 +590,10 @@ Before selecting defaults or closing open questions, calculate and record:
 - active-plus-incoming cache capacity and overhead;
 - representative serialized snapshot size;
 - backend, proxy, ingress, and client transfer constraints;
+- compressed wire size, decoded transport size, IndexedDB size, and peak Worker
+  and window memory for a representative lineage;
+- whether the proposed format can be decoded and validated incrementally without
+  reconstructing a complete lineage;
 - trace duration versus Collector decision window.
 
 An unknown that can be measured must not be resolved by invention merely to
@@ -501,6 +627,7 @@ every consumer:
 request volume -> rate limit -> acquisition deadline -> schedule
 snapshot size -> cache blocks -> simultaneous lineages -> Memcached capacity
 snapshot size -> backend response -> edge proxy -> ingress transfer
+snapshot format -> incremental Worker decode -> staged IndexedDB records -> bounded view query
 sync duration -> root span lifetime -> tail-sampling decision window
 failure boundary -> controlled classification -> log/metric/span -> operator query
 commit identity -> image tag -> Compose environment -> release archive
@@ -553,6 +680,10 @@ Before finalizing generated artifacts, the independent reviewer must answer:
 10. Is the code self-documenting, with inline comments only for non-obvious
     reasons, and is Markdown limited to specification/process artifacts and
     concise operator configuration?
+11. Does the browser import and read the representative lineage without blocking
+    the window or materializing the complete lineage in window memory?
+12. Is the transport format decision supported by measurements after standard
+    HTTP compression rather than raw-format intuition?
 
 ## Expected Story Allocation
 
@@ -570,6 +701,14 @@ ownership boundaries:
   startup effective-policy record;
 - deployment stories own 2048 MiB Memcached capacity, streaming edge behavior,
   and single ingress-owned Brotli compression;
+- one client-ingestion story owns the dedicated Worker protocol, streamed
+  decoding, bounded IndexedDB staging, cancellation, completeness validation,
+  atomic activation, and cleanup without sending the full lineage to the window;
+- storage and browsing stories own indexed, on-demand reads so startup and
+  navigation return only the metadata and records required for the current view;
+- when the SEED does not lock Protobuf, one early MADR and calibration story own
+  representative-format measurements before backend publication, HTTP serving,
+  browser decoding, and storage stories commit to a format;
 - observability integration owns the metric catalogue, OTLP filtering, five-hour
   Collector window, always-retained synchronizations, error retention, and 10%
   sampling of other successes;
@@ -601,6 +740,12 @@ durable inputs:
   configuration or non-obvious operator constraints;
 - no story documents standard tool commands or substitutes prose for clearer
   code and a focused inline comment;
+- no browser story calls `response.text()`, `response.json()`, or an equivalent
+  whole-message decoder for the production lineage;
+- no startup or navigation story loads the complete active lineage into window
+  memory;
+- the chosen transfer format has production-size evidence for compressed bytes,
+  decode memory, IndexedDB storage, and selected-record reads;
 - all dependencies point backward in the implementation order;
 - the final generated plan includes template validation, production-budget
   validation, and release work when required;
@@ -609,8 +754,9 @@ durable inputs:
 
 ## Priority Order
 
-1. Rewrite the SEED health, workload, capacity, transfer, observability, testing,
-   documentation, and delivery sections.
+1. Rewrite the SEED health, workload, capacity, transport, Worker ingestion,
+   bounded browser read, observability, testing, documentation, and delivery
+   sections.
 2. Remove duplicated normative values from explanatory SEED sections.
 3. Repair and validate the initial template task names, artifact paths, build
    skeleton, CI, and test-dependency model.
@@ -628,6 +774,10 @@ The remediation succeeds when a clean run from the revised SEED and template:
 - generates no health-endpoint work;
 - does not require later diagnosability or production-hardening stories;
 - selects feasible linked time, memory, transfer, and telemetry budgets;
+- downloads, validates, stores, and reads a production-size lineage without
+  blocking the window or materializing the complete lineage there;
+- uses a measured stream-decodable transport rather than defaulting to one
+  monolithic JSON or binary message;
 - produces self-contained tests without bespoke deployment-validation systems;
 - verifies each rule proportionally at one authoritative boundary rather than
   accumulating duplicate failsafes;
