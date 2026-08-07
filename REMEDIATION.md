@@ -71,7 +71,8 @@ behavior without later corrective stories:
 - CI validates every push to `main`;
 - manual CD publishes commit-identified Linux-amd64 images and a matching
   deployable archive with provenance, SBOMs, and attestations;
-- README remains concise and operator-facing.
+- README remains a concise operator reference containing expected environment
+  variables and only non-obvious deployment constraints.
 
 The generated plan should incorporate these requirements into the stories that
 first introduce the affected behavior. It should not defer them to later
@@ -239,9 +240,12 @@ exclude it:
   attestations.
 - The release produces a deployable archive containing production Compose,
   Caddy, Collector configuration, an environment template tied to the same
-  commit, and concise operator instructions.
-- Operator instructions cover required configuration, start, upgrade, rollback,
-  Memcached-loss recovery, and ingress timeout and Brotli ownership.
+  commit, and a concise operator reference.
+- The operator reference lists required environment variables, defaults,
+  purpose, secrecy and restart implications, plus non-obvious constraints such
+  as ingress timeout and Brotli ownership.
+- Do not document standard Docker or Docker Compose commands. Operators are
+  expected to know the ordinary lifecycle of the deployment tools they use.
 ```
 
 If a future project does not need CD, its SEED should exclude these items
@@ -252,17 +256,26 @@ explicitly. The template should not silently choose either outcome.
 Add:
 
 ```markdown
-- README is limited to project purpose and actionable operator setup,
-  configuration, operation, and troubleshooting.
+- Production code is self-documenting through precise names, cohesive modules,
+  explicit types, ordinary control flow, and small intention-revealing helpers.
+- When a non-obvious invariant or choice cannot be expressed clearly in code,
+  explain it with a concise inline comment at the constrained code.
+- README is limited to project purpose, expected environment variables and
+  their contract, and non-obvious operator constraints.
+- README does not teach standard Docker, Docker Compose, shell, Git, or service
+  lifecycle commands and does not narrate implementation details.
 - SEED owns product and architecture requirements.
 - MADRs explain architectural choices that were genuinely open in the SEED.
 - Generated stories own implementation acceptance criteria.
-- Implementation invariants belong beside the code or in focused executable
-  tests; they are not copied into README as story narratives.
+- SEED, MADRs, stories, TODO, and traceability are specification or process
+  artifacts, not product documentation.
+- Do not generate separate Markdown feature, developer, implementation, test,
+  or architecture documentation. Encode behavior in code and focused tests;
+  use inline comments only for the remaining non-obvious reasoning.
 ```
 
-This prevents every generated story from appending its internal design to
-README and later requiring a documentation cleanup.
+This prevents every generated story from appending its internal design or a
+basic tool tutorial to README and later requiring a documentation cleanup.
 
 ### 8. Define the validation boundary
 
@@ -402,7 +415,7 @@ specification reversal directly against stale generated artifacts.
 
 Generated artifacts can be replaced. They must never silently override SEED.
 
-### 6. Replace mandatory comments with a why-only policy
+### 6. Require self-documenting code, then why-only inline comments
 
 Remove the template rule requiring one comment for every module. It produces
 comments such as “this module renders” or “this module owns” that restate names
@@ -411,12 +424,13 @@ without helping a maintainer.
 Replace it with:
 
 ```markdown
-Comment only information that cannot be recovered quickly from the code:
-non-obvious invariants, security or compatibility constraints, protocol
-ownership, calibrated limits, and why a simpler-looking implementation is
-incorrect. Do not require file, module, function, or test comments merely for
-coverage. Prefer a precise comment beside the constrained mechanism over a long
-README explanation.
+First make code explain itself through names, types, structure, and ordinary
+idioms. Add a concise inline comment only when important reasoning still cannot
+be recovered quickly: a non-obvious invariant, security or compatibility
+constraint, protocol ownership, calibrated limit, or why a simpler-looking
+implementation is incorrect. Do not require file, module, function, or test
+comments merely for coverage. Do not create a Markdown document instead of
+clarifying the code. Prefer a precise comment beside the constrained mechanism.
 ```
 
 The Service Worker shell hash is the representative missed case. Its useful
@@ -469,7 +483,9 @@ Section-level traceability is insufficient. For every normative requirement:
 - identify the exact acceptance criterion that proves it;
 - identify the canonical validation mechanism;
 - identify downstream stories that consume the invariant;
-- identify the durable documentation destination, if any.
+- identify whether an operator needs non-obvious information. If so, place only
+  that information in the operator reference; otherwise require no Markdown
+  documentation artifact.
 
 Cross-cutting requirements such as observability, security, failure
 classification, cancellation, and configuration must be implemented at the
@@ -501,7 +517,12 @@ Review what each proposed validation actually does, not its label.
 - Reject large handwritten structural validators when a native parser or build
   command proves the requirement.
 - Reject integration tests that depend on a shared Compose stack or fixed port.
-- Reject documentation criteria without a named audience and destination.
+- Reject Markdown documentation criteria unless they add required environment
+  variables or non-obvious information for operators.
+- Reject operator documentation that teaches standard Docker, Compose, shell,
+  Git, or service-lifecycle commands.
+- Reject a documentation task when clearer code or one focused inline comment
+  is the proper durable explanation.
 - Reject acceptance criteria that cannot fail when the named behavior regresses.
 - Reject duplicate tests of the same rule unless each test names a distinct
   failure mode unavailable at the other boundary.
@@ -529,8 +550,9 @@ Before finalizing generated artifacts, the independent reviewer must answer:
 8. Does every generated story introduce a complete, currently operable slice?
 9. Is each important rule enforced and tested at one clearly named owning
    boundary?
-10. Does documentation explain the non-obvious reasons and omit narration that
-    is already evident from names and control flow?
+10. Is the code self-documenting, with inline comments only for non-obvious
+    reasons, and is Markdown limited to specification/process artifacts and
+    concise operator configuration?
 
 ## Expected Story Allocation
 
@@ -575,6 +597,10 @@ durable inputs:
 - no story demands exhaustive branch, log-line, or implementation-detail tests;
 - every repeated test or enforcement layer identifies a distinct failure or
   trust boundary;
+- no story creates product Markdown documentation unless it adds environment
+  configuration or non-obvious operator constraints;
+- no story documents standard tool commands or substitutes prose for clearer
+  code and a focused inline comment;
 - all dependencies point backward in the implementation order;
 - the final generated plan includes template validation, production-budget
   validation, and release work when required;
@@ -605,8 +631,9 @@ The remediation succeeds when a clean run from the revised SEED and template:
 - produces self-contained tests without bespoke deployment-validation systems;
 - verifies each rule proportionally at one authoritative boundary rather than
   accumulating duplicate failsafes;
-- keeps README concise;
-- documents non-obvious invariants instead of requiring ceremonial comments;
+- keeps README to environment contracts and non-obvious operator constraints;
+- produces self-documenting code and explains only the remaining non-obvious
+  invariants with focused inline comments;
 - includes the intended CI/CD path;
 - and reaches the intended generated outcome without manual scope, logging,
   capacity, timeout, or delivery corrections.
