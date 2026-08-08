@@ -1,31 +1,25 @@
 # 4Visor
 
-## Vision
+## Purpose and authority
 
-4Visor is a read-only anonymous Progressive Web App that presents 4chan through
-a modern, content-focused interface while preserving the ordering, content and
-philosophy of the original platform.
+4Visor is a read-only anonymous Progressive Web App that presents frozen
+snapshots of 4chan through a modern, content-focused interface while preserving
+the ordering, content, and philosophy of the original platform.
 
-4Visor is a personal-grade project. It favors a small, understandable deployment
-over enterprise-grade availability and hardening.
+4Visor is a personal-grade project. It favors a small, understandable
+deployment over enterprise-grade availability and hardening. This document
+defines the intended target architecture; it does not claim that every described
+component already exists.
 
-This document defines the intended target architecture. It does not assert that
-every described component already exists in the repository.
+The **Normative requirements** section is the single source of product truth.
+Each requirement has a stable identifier. Every other section is explanatory
+and refers to those identifiers instead of redefining behavior, values, or
+defaults. If explanatory material conflicts with a normative requirement, the
+identified requirement wins.
 
-The system is intentionally opinionated:
-
-- Read-only.
-- Anonymous.
-- No accounts.
-- No personalization.
-- No moderation.
-- No search.
-- No bookmarks.
-- No recommendations.
-- No client-triggered upstream fetching.
-
-The application presents frozen snapshots of 4chan exactly as observed by the
-backend.
+MADRs may decide only matters that a requirement deliberately leaves open.
+Generated stories and validation plans implement and prove requirements; they
+do not create or override product truth.
 
 ## Personas
 
@@ -35,2343 +29,606 @@ Browses cached snapshots anonymously.
 
 ### Operator
 
-Deploys, monitors and upgrades 4Visor.
+Deploys, monitors, and upgrades 4Visor.
 
-## Axioms
+## Normative requirements
 
-> These axioms define the fundamental nature of 4Visor. They are stronger than
-> requirements and should not change without redefining the project itself.
+### Product axioms and scope
 
-- 4Visor is a **read-only 4chan reader**.
-- 4Visor is a **Progressive Web App**.
-- 4Visor is **anonymous** and has no concept of user identity.
-- 4Visor does not replace, extend or augment 4chan; it presents existing content
-  through a different interface.
-- Every backend synchronization produces one **immutable lineage**.
-- Every lineage is constructed **independently from scratch**.
-- Clients always render from **one complete local lineage**.
-- Clients never observe a partially synchronized lineage.
-- The backend is authoritative for lineage selection.
-- The backend never reasons about, ranks, filters or reorders 4chan content.
-- Boards, catalogs, threads and posts preserve upstream ordering exactly as
-  observed.
-- Original post HTML is stored unchanged.
-- The backend caches textual resources only.
-- Images, videos and other binary media are never cached by the backend.
-- Browser media retrieval is independent of textual snapshot synchronization.
-- Failed resources remain visible rather than being silently hidden.
-- Degraded lineages are valid snapshots.
-- One backend instance is authoritative for the active lineage.
-- Client-side snapshots provide continuity when server-side services are
-  unavailable.
-- Memcached is an ephemeral serving cache rather than a durable database.
-- The browser is the primary serving layer after synchronization completes.
-- Preact is the only frontend framework used by 4Visor. All persistence,
-  networking, offline support and application lifecycle rely directly on browser
-  APIs.
-- Observability is trace-first.
-- Simplicity, determinism and transparency take precedence over completeness and
-  automation.
-- After synchronization, the browser becomes the serving layer for textual
-  content.
-- 4Visor stores only operational local state required for synchronization and
-  offline operation. It stores no user preferences or personalization.
+- **PROD-01 — Product identity.** 4Visor is a read-only anonymous Progressive
+  Web App for browsing 4chan. It has no accounts or identity model and supports
+  no posting, replying, deletion, reporting, moderation, or server-side session
+  state.
+- **PROD-02 — No personalization.** 4Visor provides no preferences,
+  personalization, ranking, filtering, recommendations, search, bookmarks,
+  saved threads, read state, notifications, analytics, or user tracking.
+- **PROD-03 — Upstream fidelity.** The system preserves boards, catalogs,
+  threads, posts, page boundaries, and ordering exactly as observed. It does
+  not repair, infer, rank, filter, or reorder upstream content. Canonical thread
+  and post URLs remain the original 4chan URLs.
+- **PROD-04 — Snapshot presentation.** The application presents one frozen
+  lineage at a time. Failed, absent, and oversize resources remain honest and
+  visible rather than being silently hidden or repaired.
+- **PROD-05 — Operational state only.** 4Visor stores only state needed for
+  synchronization, serving, and offline operation.
 
-## Full Requirements
+### Snapshot model and content
 
-> These requirements describe the intended behavior of 4Visor. They
-> intentionally favor determinism, simplicity and observability over
-> completeness, configurability and feature richness.
-
-### Product
-
-- 4Visor shall be a read-only anonymous Progressive Web App for browsing 4chan.
-- The system shall not support posting, replying, deleting or moderating
-  content.
-- The system shall not require or support user accounts.
-- The system shall not personalize, rank, recommend or curate content.
-- The system shall not provide search.
-- The system shall not provide bookmarks or read state.
-- Canonical thread and post URLs remain the original 4chan URLs.
-- The application shall preserve upstream ordering exactly as observed.
-
-### Snapshot model
-
-- Every backend synchronization produces a new immutable lineage.
-- Every lineage is constructed independently from previous lineages.
-- Previous cacheability never influences future cacheability.
-- The active lineage remains available until a replacement lineage completes.
-- Lineage activation is atomic.
-- Clients never observe a partially synchronized lineage.
-- The backend is authoritative; the client accepts the active lineage it serves.
-
-### Backend cache
-
-- Cache every board.
-- Cache the first 250 catalog threads exactly as returned by 4chan.
-- Cache up to the first 250 posts returned for each thread.
-- Threads exceeding 250 posts shall be marked `oversize` and truncated.
-- Images, videos and binary attachments shall never be cached by the backend.
-- Resources are stored exactly as received except for cache metadata.
-
-### Client synchronization
-
-- The PWA synchronizes approximately once per hour.
-- Refresh uses a stable installation-local jitter between 5 and 60 seconds.
-- A new lineage is downloaded completely before activation.
-- Transport may use one payload or multiple fixed batches transparently.
-- The previous lineage remains usable during synchronization.
-- On successful validation the new lineage atomically replaces the previous one.
-- On failure the previous lineage remains active.
-- Only one active lineage is retained after synchronization.
-
-### Local storage
-
-- IndexedDB is mandatory.
-- Snapshot data is stored exclusively in IndexedDB.
-- Service Worker Cache Storage stores only the application shell and static
-  assets.
-- If IndexedDB is unavailable the application fails with a clear error.
-- A manual "Reset local data" action shall clear all locally stored application
-  data.
-- Storage quota exhaustion prevents synchronization while preserving the current
+- **SNAP-01 — Immutable lineages.** Every backend synchronization constructs a
+  new immutable lineage independently from scratch. Previous cacheability never
+  affects the new lineage.
+- **SNAP-02 — Atomic authority.** The backend instance required by DEP-01 is
+  authoritative for the active lineage. Clients accept the lineage it serves,
+  never merge lineages, and never observe a partially constructed or imported
   lineage.
-
-### Rendering
-
-- Backend stores upstream HTML unchanged.
-- Frontend sanitizes all upstream HTML before rendering.
-- Unsupported markup is rendered as plain text.
-- External hyperlinks remain clickable.
-- Quote links navigate to the canonical 4chan URL.
-- The frontend never injects unsanitized upstream HTML into the main document.
-
-### Media
-
-- Thumbnails load automatically while online.
-- Full-resolution media loads only after explicit user interaction.
-- Browser HTTP caching may retain media opportunistically.
-- The application performs no explicit media caching.
-- Offline or unavailable media displays a fixed placeholder.
-- Retry is user initiated only.
-- Spoiler media remains hidden until revealed.
-
-### User interface
-
-- Responsive layout with mobile-first design.
-- Board catalogs are displayed as compact rows.
-- Replies are visually nested.
-- Posts are collapsible.
-- Snapshot lineage identifier and age are always visible.
-- Failed and oversize resources remain visible with degraded presentation.
-
-### Upstream acquisition
-
-- Default synchronization interval is four hours and configurable.
-- Backend startup jitter is stable between 5 and 60 seconds.
-- Maximum outbound concurrency defaults to 10.
-- Outbound requests are globally rate limited.
-- Individual requests time out after five seconds.
-- Lineage construction has a configurable maximum duration of four hours by default.
-- Selective retries are permitted only for transient failures such as timeouts,
-  network failures and rate limiting.
-- Outbound User-Agent is `4Visor/<commit-hash-of-deployed-version>`.
-
-### Failure handling
-
-- Resource acquisition failures are represented as failed resources inside the
-  lineage.
-- Unknown missing resources remain absent.
-- Lineages activate regardless of degradation level.
-- Construction, validation, publication, cache-write and cancellation failures
-  preserve the current active lineage.
-- Excessively degraded lineages emit prominent logs and error traces.
-- Unfinished resources when the lineage deadline expires are marked failed.
-
-### Deployment
-
-- Docker Compose is the deployment model.
-- A dedicated Caddy reverse proxy is the only host-exposed Compose service and
-  binds only to `127.0.0.1`.
-- The edge Caddy removes `/api` from `/api/*` requests before proxying them to
-  the Go backend; all other requests go to the frontend service.
-- The frontend and backend are separate internal services.
-- The frontend container uses Caddy to serve built assets.
-- The backend container exposes the Go HTTP server directly.
-- Project-built container images are distroless, run rootless and use read-only
-  filesystems.
-- Third-party container images are not required to adopt project-owned
-  hardening.
-- TLS is terminated by the ingress.
-- Go application configuration is provided exclusively through environment
-  variables prefixed `FOURVISOR_`.
-- Health checks verify backend responsiveness, Memcached availability and 4chan
-  DNS resolution.
-
-### Platform and testing
-
-- Linux amd64 is the only supported deployment architecture.
-- Chrome for Android 150 and newer is the only supported browser target.
-- Automated tests are limited to unit and integration tests.
-- Smoke, end-to-end and deployment tests are not provided.
-
-### Observability
-
-- OpenTelemetry is the observability system for Go application telemetry.
-- Caddy and third-party container stdout logs are outside the OpenTelemetry
-  contract.
-- Metrics remain intentionally minimal.
-- Logs record meaningful state transitions and failures only.
-- HTTP requests and scheduled synchronizations produce root traces.
-- Child spans represent HTTP, Memcached and internal operations.
-- Successful traces are sampled.
-- Failed traces are always retained.
-
-## High-Level Architecture
-
-```mermaid
-flowchart LR
-    User[Reader] --> PWA[4Visor PWA]
-
-    subgraph Client[Browser]
-        PWA --> IndexedDB[(IndexedDB active lineage)]
-        PWA --> ShellCache[(Service Worker shell cache)]
-        PWA -->|direct media requests| Media[4chan media]
-    end
-
-    PWA -->|assets and snapshot synchronization| Ingress[VPS ingress / TLS termination]
-    Ingress -->|HTTP over 127.0.0.1| Edge[Caddy reverse proxy]
-    Edge -->|non-API requests| Frontend[Frontend Caddy]
-    Edge -->|strip /api from /api/*| Backend[Go backend]
-    Backend --> Memcached[(Memcached)]
-    Backend -->|scheduled HTTP acquisition| API[4chan API]
-    Backend --> OTel[OpenTelemetry Collector]
-    OTel --> Observability[Metrics, logs and traces]
-```
-
-4Visor uses a client-first snapshot architecture.
-
-The PWA serves all board and thread content from one complete local lineage
-stored in IndexedDB. It contacts the backend only when its refresh interval
-expires and a replacement snapshot is due. The client never requests individual
-boards, threads or posts from the backend and never calls the 4chan API for
-textual content.
-
-The VPS ingress reaches one dedicated Caddy reverse proxy over loopback. Caddy
-removes `/api` from `/api/*` requests before proxying them to the internal Go
-backend and routes every other request to the internal frontend Caddy. Neither
-internal service is exposed on the host.
-
-The single backend acquires 4chan data, constructs a frozen lineage and exposes
-the active snapshot from Memcached. Once downloaded, that lineage remains
-locally authoritative until the next complete synchronization.
-
-### Client architecture
-
-```mermaid
-flowchart TD
-    Start[PWA starts] --> OpenDB[Open IndexedDB]
-    OpenDB -->|failure| StorageError[Show mandatory storage error]
-    OpenDB -->|success| LoadActive[Load active local lineage]
-
-    LoadActive --> Render[Render local snapshot]
-    Render --> RefreshDue{Refresh interval elapsed?}
-
-    RefreshDue -->|No| Continue[Continue serving local lineage]
-    RefreshDue -->|Yes| Fetch[Download backend snapshot]
-
-    Fetch -->|failure| Keep[Keep current lineage]
-    Fetch -->|success| Stage[Write incoming lineage to temporary storage]
-    Stage --> Validate[Validate JSON and schema version]
-    Validate -->|failure| Keep
-    Validate -->|success| Swap[Atomically activate incoming lineage]
-    Swap --> Cleanup[Delete previous lineage]
-    Cleanup --> Render
-```
-
-The browser maintains at most:
-
-- one active lineage;
-- one temporary incoming lineage during synchronization;
-- the application shell and static assets in Service Worker Cache Storage.
-
-The PWA does not progressively merge new data into the visible snapshot. It
-continues serving the current lineage until the replacement has been completely
-downloaded, parsed, validated and stored.
-
-If synchronization fails, the previous lineage remains available. If storage
-quota is insufficient, synchronization stops and the current lineage is
-retained.
-
-### Backend
-
-```mermaid
-flowchart TD
-    Scheduler[Instance-local scheduler] --> Sync[lineage synchronization]
-    Sync --> Boards[Fetch board list]
-    Boards --> Catalogs[Fetch board catalogs]
-    Catalogs --> Threads[Fetch eligible threads]
-    Threads --> Build[Build immutable lineage blocks]
-    Build --> Memcached[(Local Memcached)]
-    Memcached --> Activate[Switch active lineage pointer]
-    Activate --> Evict[Evict previous lineage]
-
-    HTTP[Inbound snapshot request] --> Active[Read active lineage pointer]
-    Active --> Memcached
-    Memcached --> Stream[Stream logical JSON snapshot]
-```
-
-The backend owns:
-
-- one Go backend process;
-- one Memcached instance;
-- one instance-local synchronization schedule;
-- one active lineage;
-- one lineage under construction when synchronization is running.
-
-A backend synchronization creates a new lineage namespace and writes every
-required cache block before activation. The active lineage pointer changes only
-after the new lineage is complete from the backend's perspective.
-
-The previous lineage is evicted immediately after activation. Lineage keys also
-use a TTL equal to twice the configured synchronization interval as cleanup
-insurance.
-
-If the active lineage references a missing Memcached block, the backend returns
-HTTP `410 Gone`.
-
-### Single lineage authority
-
-The single backend is authoritative for lineage selection. The client accepts
-the completed lineage it serves and does not merge or reconcile lineages.
-
-### Snapshot contents
-
-A lineage contains:
-
-- lineage metadata;
-- all boards observed during synchronization;
-- the first 250 catalog threads returned for each board;
-- up to the first 250 posts returned for each fetched thread;
-- explicit failed-resource representations where the resource was known but
-  acquisition failed;
-- explicit oversize markers where more than 250 posts were returned;
-- original post HTML and media references exactly as received.
-
-A lineage does not contain:
-
-- images;
-- thumbnails;
-- video;
-- audio;
-- downloadable files;
-- user preferences;
-- bookmarks;
-- read state;
-- search indexes;
-- recommendations;
-- server-side session data.
-
-### HTTP routing
-
-The edge Caddy is the only browser-facing origin. It handles requests in this
-order:
-
-1. Requests under `/api/*` have the `/api` prefix removed and are proxied to the
-   internal Go HTTP server.
-2. Every other request is proxied to the internal frontend Caddy.
-
-The external and internal routes are:
-
-| Browser request      | Go backend request | Behavior |
-| -------------------- | ------------------ | -------- |
-| `GET /api/snapshot`  | `GET /snapshot`    | Return the active snapshot or `410 Gone` |
-| `GET /api/health`    | `GET /health`      | Return `200 OK` when healthy or `503 Service Unavailable` otherwise |
-
-The health response body is non-contractual and must not disclose dependency
-details or secrets. No readiness endpoint or additional public backend route is
-required.
-
-### Snapshot transfer
-
-```mermaid
-flowchart LR
-    Memcached[(Lineage blocks)] --> Backend[Go backend /snapshot]
-    Backend --> Edge[Edge Caddy /api/snapshot]
-    Edge --> Ingress[VPS ingress]
-    Ingress -->|Brotli HTTP encoding| PWA[4Visor PWA]
-    PWA -->|browser decompression| Parser[JSON parsing]
-    Parser --> IndexedDB[(Temporary lineage)]
-```
-
-`GET /api/snapshot` exposes one logical snapshot in one JSON response. The Go
-backend receives the request as `GET /snapshot`. Internally, it may store the
-lineage as multiple Memcached blocks to remain below per-item limits.
-
-The VPS ingress applies Brotli compression through standard HTTP content
-encoding. Both Caddy services forward the response without owning Brotli
-compression. The browser performs normal transport decompression before the PWA
-parses the JSON.
-
-The architecture does not require:
-
-- range requests;
-- resumable downloads;
-- per-resource endpoints;
-- incremental thread fetching;
-- a separate manifest request;
-- binary serialization.
-
-If measured snapshot size becomes impractical, the same lineage may later be
-exposed as fixed blocks. All blocks would still belong to one atomic client
-synchronization and would never be activated partially.
-
-### Snapshot schema version 1
-
-The snapshot is one nested JSON document:
-
-```json
-{
-  "schemaVersion": 1,
-  "lineageId": "01H...",
-  "observedAt": "2026-07-26T12:00:00Z",
-  "boards": {
-    "state": "present",
-    "items": [
-      {
-        "board": {},
-        "catalog": {
-          "state": "present",
-          "pages": [
-            {
-              "metadata": {},
-              "threads": [
-                {
-                  "summary": {},
-                  "thread": { "state": "present", "posts": [] }
-                }
-              ]
-            }
-          ]
-        }
-      }
-    ]
-  }
-}
-```
-
-The contract is exact:
-
-- The root requires only integer `schemaVersion`, string `lineageId`, string
-  `observedAt` and object `boards`.
-- `schemaVersion` is exactly `1`; the route itself is not versioned.
-- `lineageId` is a valid ULID. `observedAt` is the UTC RFC 3339 time captured
-  when lineage construction starts.
-- `boards` is exactly `{ "state": "failed" }` or `{ "state": "present",
-  "items": [...] }`.
-- A board item requires opaque object `board`; optional `catalog` is absent only
-  for an unknown missing catalog.
-- A catalog is exactly `{ "state": "failed" }` or `{ "state": "present",
-  "pages": [...] }`. The ordered pages contain at most the first 250 thread
-  summaries in total.
-- A page requires opaque object `metadata` and ordered array `threads`. Page
-  order and boundaries are preserved; `metadata` contains every upstream page
-  field except `threads`.
-- A thread entry requires opaque object `summary`; optional `thread` is absent
-  only for an unknown missing thread.
-- A thread resource is exactly `{ "state": "failed" }`, or has state `present`
-  or `oversize` plus an ordered array of opaque post objects. `present` contains
-  zero to 250 posts; `oversize` contains exactly the first 250 returned posts.
-- Failed resources contain no payload or failure-detail string. Absent resources
-  have no wrapper.
-- Contract wrappers reject unknown fields, missing fields, wrong types, invalid
-  state/payload combinations, invalid ULIDs, non-UTC timestamps and excess
-  cardinality. Board, summary and post objects retain unrestricted upstream
+- **SNAP-03 — Lineage content.** A lineage contains metadata, every observed
+  board, each board catalog, eligible threads and posts, explicit known-resource
+  failures, oversize markers, original post HTML, and media references.
+- **SNAP-04 — Content limits.** Let `C_content = 250`. Catalogs retain the first
+  `C_content` threads exactly as returned. Threads retain at most the first
+  `C_content` posts; a thread returning more is marked `oversize` and contains
+  exactly those first posts.
+- **SNAP-05 — Text only.** Backend lineages never contain images, thumbnails,
+  video, audio, downloadable files, or other binary media.
+- **SNAP-06 — Resource states.** Boards and catalogs are `present` or `failed`.
+  Threads are `present`, `failed`, or `oversize`. A known technical acquisition
+  failure is explicit; an unexplained missing resource is absent. Failed
+  resources contain no payload or failure-detail string.
+- **SNAP-07 — Semantic contract.** Lineage metadata includes a valid ULID, the
+  UTC RFC 3339 observation time captured when construction starts, a declared
+  schema version, ordered resource records, expected record counts, and
+  integrity metadata. Contract-owned records reject unknown or missing fields,
+  wrong types, invalid state/payload combinations, invalid identifiers,
+  non-UTC timestamps, and excess cardinality. Opaque upstream board, page,
+  summary, post, and media-reference values preserve unrestricted upstream
   fields and values.
-
-Clients accept exactly schema version 1. A missing, non-integer or different
-version rejects the incoming snapshot while preserving the active local lineage.
-Version 1 has no migration, adapter or compatibility window.
-
-### Upstream acquisition
-
-```mermaid
-flowchart TD
-    Trigger[Scheduled lineage trigger] --> Deadline[Start configured lineage deadline]
-    Deadline --> RateLimit[Global outbound rate limiter]
-    RateLimit --> Request[4chan HTTP request]
-    Request -->|success| Store[Store resource in building lineage]
-    Request -->|transient failure| Retry[Bounded retry]
-    Retry --> RateLimit
-    Request -->|terminal or exhausted failure| Failed[Record failed resource]
-    Deadline -->|expired| Unfinished[Mark unfinished resources failed]
-    Store --> Complete[Complete lineage]
-    Failed --> Complete
-    Unfinished --> Complete
-```
-
-The backend performs scheduled acquisition on its own schedule.
-
-Default acquisition policy:
-
-- synchronization every four hours;
-- stable instance-local startup jitter between 5 and 60 seconds;
-- maximum outbound concurrency of 10;
-- global request rate limiting;
-- five-second request timeout;
-- configurable lineage duration, four hours by default;
-- bounded retries for network failures, timeouts and rate limiting;
-- outbound `User-Agent` of `4Visor/<commit-hash-of-deployed-version>`.
-
-The acquisition process stores upstream ordering and values as observed. It does
-not rank, reorder, repair or infer missing content.
-
-### Media path
-
-```mermaid
-flowchart LR
-    PWA[4Visor PWA] -->|direct request| Media[4chan media URL]
-    Media -->|available| Browser[Browser rendering / ordinary HTTP cache]
-    Media -->|unavailable or offline| Placeholder[You are offline placeholder]
-    Placeholder -->|manual retry| Media
-```
-
-Media bypasses the backend entirely.
-
-The PWA loads thumbnails automatically while online. Full-size media requires
-explicit user interaction. Spoiler media remains hidden until revealed.
-
-The application does not manage a media cache. The browser may retain media
-through ordinary HTTP caching, but that behavior is outside the 4Visor data
-model.
-
-### Observability path
-
-```mermaid
-flowchart TD
-    Inbound[Inbound HTTP root span] --> Cache[Memcached child spans]
-    Inbound --> Handler[Internal handler spans]
-
-    Schedule[Scheduled synchronization root span] --> HTTP[4chan outbound spans]
-    Schedule --> Cache2[Memcached child spans]
-    Schedule --> Internal[Lineage construction spans]
-
-    Inbound --> Collector[OpenTelemetry Collector]
-    Schedule --> Collector
-    Collector --> Tail{Tail sampling}
-    Tail -->|failed trace| KeepAll[Retain]
-    Tail -->|successful trace| Sample[Retain approximately 10%]
-```
-
-4Visor is trace-first.
-
-Root spans are created for:
-
-- inbound HTTP requests;
-- scheduled lineage synchronizations.
-
-Child spans describe:
-
-- outbound 4chan requests;
-- Memcached operations;
-- lineage construction;
-- lineage activation;
-- previous-lineage eviction;
-- internal request processing.
-
-Logs record meaningful state transitions and errors rather than routine request
-begin/end messages.
-
-Metrics remain limited to high-value signals around:
-
-- inbound HTTP volume and latency;
-- outbound HTTP volume and latency;
-- Memcached operations, latency, hits, misses and errors;
-- lineage duration and outcome;
-- failed-resource counts;
-- active lineage age.
-
-The OpenTelemetry Collector retains all failed traces and approximately 10
-percent of fully successful traces.
-
-## Operational Flows
-
-### Client startup
-
-```mermaid
-flowchart TD
-    Start[PWA starts] --> OpenDB[Open IndexedDB]
-    OpenDB -->|unavailable or corrupted| Fail[Show mandatory storage failure]
-    OpenDB -->|available| Load[Load active local lineage]
-    Load -->|present| Render[Render cached snapshot]
-    Load -->|absent| Empty[Show no local snapshot]
-    Render --> Schedule[Schedule next synchronization]
-    Empty --> Schedule
-```
-
-The PWA requires IndexedDB.
-
-If IndexedDB cannot be opened, the application does not fall back to an
-in-memory or online-only mode. It shows a clear error explaining that local
-browser storage must be available.
-
-If an active lineage exists, it is rendered immediately. The client does not
-wait for the backend before becoming usable.
-
-If no lineage exists, the application remains empty until the first complete
-synchronization succeeds.
-
-### Client synchronization
-
-```mermaid
-flowchart TD
-    Trigger[Refresh interval plus stable jitter elapsed] --> Request[GET /api/snapshot]
-    Request -->|network or HTTP failure| Keep[Keep current local lineage]
-    Request -->|410 Gone| Keep
-    Request -->|snapshot received| Stage[Write incoming lineage to temporary IndexedDB storage]
-    Stage -->|quota or storage failure| StorageFail[Keep current lineage and report storage failure]
-    Stage --> Validate[Validate JSON and schema version]
-    Validate -->|invalid or incompatible| SchemaFail[Fail visibly and keep current lineage]
-    Validate -->|valid| Commit[Atomically switch active lineage]
-    Commit --> Cleanup[Delete previous lineage]
-    Cleanup --> Render[Render new lineage]
-```
-
-The client synchronizes one complete lineage at a time.
-
-The transfer may use one response or multiple fixed blocks, but all transferred
-data belongs to one lineage and is staged before activation.
-
-The visible snapshot is never progressively mutated. The existing lineage
-remains active until the replacement is fully downloaded, parsed, validated and
-stored.
-
-The client accepts the lineage served by the backend without comparing its
-timestamp or identifier to the local lineage. The backend is authoritative.
-
-If any part of synchronization fails:
-
-- the incoming lineage remains inactive;
-- the current lineage remains active;
-- the user receives a clear error;
-- the client waits until the next scheduled synchronization attempt.
-
-### First installation jitter
-
-```mermaid
-flowchart TD
-    Install[PWA first activation] --> Seed[Generate installation-local random seed]
-    Seed --> Persist[Store seed in IndexedDB]
-    Persist --> Derive[Derive stable jitter between 5 and 60 seconds]
-    Derive --> Reuse[Reuse jitter for future refresh cycles]
-```
-
-Each browser installation generates a random local seed.
-
-The seed:
-
-- is not derived from device or browser fingerprinting data;
-- is never sent to the backend;
-- remains stable until local application data is reset;
-- determines a stable client synchronization offset.
-
-Resetting local data removes the seed and causes a new offset to be generated.
-
-### Scheduled backend synchronization
-
-```mermaid
-flowchart TD
-    Scheduler[Four-hour scheduler plus stable instance jitter] --> Begin[Create new ULID lineage]
-    Begin --> Deadline[Start configured synchronization deadline]
-    Deadline --> Boards[Fetch board list]
-    Boards --> Catalogs[Fetch board catalogs]
-    Catalogs --> Threads[Fetch eligible threads]
-    Threads --> Finalize[Finalize lineage contents]
-    Finalize --> Persist[Write lineage blocks to Memcached]
-    Persist --> Activate[Atomically switch active lineage pointer]
-    Activate --> Evict[Immediately evict previous lineage]
-    Evict --> Complete[Emit lineage completion signals]
-```
-
-The backend runs its own scheduler and constructs one lineage at a time.
-
-The default synchronization interval is four hours. The backend selects a stable
-random startup offset between 5 and 60 seconds.
-
-The synchronization process starts from scratch. No resource is retained merely
-because it was cacheable in a previous lineage.
-
-The backend continues serving the current active lineage while the next lineage
-is under construction.
-
-### Board acquisition
-
-```mermaid
-flowchart TD
-    Start[Fetch board list] --> Rate[Wait for global rate limiter]
-    Rate --> HTTP[Call 4chan API]
-    HTTP -->|success| Store[Store boards exactly as returned]
-    HTTP -->|transient failure| Retry{Retry allowed?}
-    Retry -->|yes| Rate
-    Retry -->|no| Failed[Record board-list failure]
-    HTTP -->|non-retryable failure| Failed
-```
-
-The backend stores board data and ordering exactly as returned by 4chan.
-
-It does not:
-
-- exclude boards;
-- reorder boards;
-- infer moderation state;
-- repair malformed content;
-- supplement missing boards from previous lineages.
-
-If the board request fails, the lineage is completed with `boards.state` set to
-`failed` and activated when construction and publication succeed.
-
-### Catalog acquisition
-
-```mermaid
-flowchart TD
-    Board[Known board] --> Rate[Wait for global rate limiter]
-    Rate --> Fetch[Fetch board catalog]
-    Fetch -->|success| First[Take first 250 threads as returned]
-    First --> Store[Store catalog ordering and metadata]
-    Fetch -->|technical failure| Failed[Mark board catalog failed]
-    Fetch -->|board not observed or unexplained absence| Absent[Leave board resource absent]
-```
-
-For each known board, the backend fetches the catalog and takes the first 250
-threads exactly in upstream order.
-
-A technical acquisition failure creates an explicit failed resource.
-
-An unexplained absence remains absent. The backend does not infer that a board
-was banned, removed or moderated.
-
-### Thread acquisition
-
-```mermaid
-flowchart TD
-    Candidate[Catalog thread candidate] --> Rate[Wait for global rate limiter]
-    Rate --> Fetch[Fetch thread]
-    Fetch -->|success| Count{Posts returned}
-    Count -->|250 or fewer| Cache[Cache complete thread]
-    Count -->|more than 250| Truncate[Cache first 250 posts and mark oversize]
-    Fetch -->|transient failure| Retry{Retry allowed?}
-    Retry -->|yes| Rate
-    Retry -->|no| Failed[Mark thread failed]
-    Fetch -->|non-retryable failure| Failed
-    Deadline[Lineage deadline expires] --> Unfinished[Mark unfinished thread failed]
-```
-
-The backend caches at most the first 250 posts returned for a thread.
-
-If more than 250 posts are returned:
-
-- the first 250 are cached;
-- original ordering is preserved;
-- the thread is marked `oversize`;
-- the uncached remainder is not retrievable through another endpoint.
-
-There is no client-side or backend escape hatch for fetching the remainder.
-
-### Retry behavior
-
-```mermaid
-flowchart TD
-    Failure[Request failure] --> Classify{Failure class}
-    Classify -->|network error| Retry[Allow bounded retry]
-    Classify -->|timeout| Retry
-    Classify -->|rate limiting| Delay[Respect Retry-After when available]
-    Delay --> Retry
-    Classify -->|other HTTP failure| Stop[Do not retry]
-    Retry --> Deadline{Lineage deadline remaining?}
-    Deadline -->|yes| Attempt[Retry through same rate limiter]
-    Deadline -->|no| Failed[Mark resource failed]
-```
-
-Retries are marginal and selective.
-
-They exist only for transient failures such as:
-
-- network errors;
-- request timeouts;
-- rate limiting.
-
-Retries remain subject to:
-
-- the global outbound rate limiter;
-- the five-second request timeout;
-- the configured lineage deadline.
-
-The system does not provide retry queues, background repair or guaranteed
-completion.
-
-### Lineage construction and activation
-
-```mermaid
-flowchart TD
-    Gather[Collected boards, catalogs and threads] --> Build[Build immutable lineage blocks]
-    Build --> Write[Write every block to Memcached]
-    Write -->|any write failure| Fail[Fail activation attempt]
-    Write -->|all writes succeed| Meta[Write completed lineage metadata]
-    Meta --> Switch[Switch active lineage pointer]
-    Switch --> Evict[Delete previous lineage keys]
-    Evict --> TTL[Allow TTL to clean residual keys]
-```
-
-Lineage data may be split across multiple Memcached values.
-
-The active pointer is changed only after all required blocks and completion
-metadata have been written successfully.
-
-Construction or contract-validation failure, cache-write failure, publication
-failure or cancellation prevents the pointer change and preserves the current
-active lineage.
-
-The previous lineage is deleted immediately after activation.
-
-All lineage keys also receive a TTL equal to twice the configured
-synchronization interval. TTL is a cleanup fallback, not the normal lifecycle
-mechanism.
-
-### Serving a snapshot
-
-```mermaid
-flowchart TD
-    Request[Inbound snapshot request] --> Active[Read active lineage pointer]
-    Active -->|missing| Gone[Return 410 Gone]
-    Active --> Metadata[Read completed lineage metadata]
-    Metadata -->|missing or incomplete| Gone
-    Metadata --> Blocks[Read all lineage blocks]
-    Blocks -->|any block missing| Gone
-    Blocks --> Stream[Stream one logical JSON snapshot]
-    Stream --> Edge[Edge Caddy]
-    Edge --> Ingress[VPS ingress applies Brotli encoding]
-    Ingress --> Client[PWA receives snapshot]
-```
-
-The backend serves one logical JSON snapshot from `GET /snapshot`. The edge
-Caddy exposes it to the browser as `GET /api/snapshot`.
-
-The internal Memcached representation may use multiple blocks, but this does not
-require a block-oriented public API.
-
-If the active lineage pointer, completion metadata or any required block is
-missing, the backend returns HTTP `410 Gone`.
-
-A missing active resource caused by Memcached eviction is treated as an expired
-or unavailable snapshot, not as a normal resource-level `404`.
-
-### Degraded lineage completion
-
-```mermaid
-flowchart TD
-    Finish[Lineage acquisition ends] --> Count[Count failed resources]
-    Count --> Compare{Failures exceed tolerance?}
-    Compare -->|No| Normal[Activate lineage and emit normal completion event]
-    Compare -->|Yes| Degraded[Activate lineage]
-    Degraded --> ErrorSpan[Mark synchronization root span as error]
-    Degraded --> AlertLog[Emit prominent structured error log]
-    ErrorSpan --> Trace[Retain complete trace through tail sampling]
-```
-
-A lineage is always eligible for activation regardless of how incomplete it is.
-
-The failure tolerance exists only for observability.
-
-When failed-resource count exceeds the configured tolerance:
-
-- the lineage still activates;
-- the synchronization root span is marked as an error;
-- a prominent structured log is emitted;
-- the complete trace is retained;
-- attributes include the lineage identifier, failed-resource count and tolerated
-  count.
-
-This allows the operator to locate the complete trace using the lineage ULID.
-
-### Client rendering
-
-```mermaid
-flowchart TD
-    Snapshot[Active IndexedDB lineage] --> Boards[Render board list]
-    Boards --> Catalog[Render compact catalog rows]
-    Catalog --> Thread[Render selected thread]
-    Thread --> Nested[Build nested reply presentation]
-    Nested --> Posts[Render collapsible posts]
-    Posts --> Sanitize[Sanitize upstream HTML]
-    Sanitize --> Links[Keep original clickable links]
-```
-
-The UI renders only from the active local lineage.
-
-The PWA does not:
-
-- fetch individual missing resources;
-- reconcile against a backend after rendering;
-- infer deleted or moderated content;
-- reorder threads or posts;
-- apply personalization or filtering.
-
-Failed and oversize resources remain in their normal position and are displayed
-with a clearly degraded appearance.
-
-The active lineage ULID and snapshot age remain visible.
-
-### Missing local resource
-
-```mermaid
-flowchart TD
-    Select[User selects board or thread] --> Lookup[Lookup in active local lineage]
-    Lookup -->|present| Render[Render resource]
-    Lookup -->|absent| Message[Show not available in this snapshot]
-```
-
-A missing local resource does not trigger a backend request.
-
-The client does not ask for:
-
-- an individual board;
-- an individual catalog;
-- an individual thread;
-- additional posts;
-- an uncached resource.
-
-The user may follow the canonical 4chan URL outside 4Visor.
-
-### Post markup rendering
-
-```mermaid
-flowchart TD
-    HTML[Upstream post HTML] --> Parse[Parse into DOM]
-    Parse --> Allow[Apply strict element and attribute allowlist]
-    Allow -->|supported safe markup| Render[Render sanitized markup]
-    Allow -->|unsupported markup| Text[Render as plain text]
-    Render --> Links[Preserve original link destinations]
-```
-
-The backend stores upstream post HTML unchanged.
-
-The PWA sanitizes it before rendering. Unsupported markup is converted to plain
-text rather than silently discarded.
-
-All hyperlinks remain clickable and point to their original destinations.
-
-Quote links point directly to the canonical 4chan thread or post URL rather than
-navigating inside the PWA.
-
-### Thumbnail loading
-
-```mermaid
-flowchart TD
-    Post[Post with media metadata] --> Online{Browser online?}
-    Online -->|yes| Thumb[Request thumbnail directly from 4chan]
-    Online -->|no| Placeholder[Show offline placeholder]
-    Thumb -->|success| Display[Display thumbnail]
-    Thumb -->|failure| Placeholder
-    Placeholder --> Retry[Offer manual retry]
-    Retry --> Thumb
-```
-
-Thumbnails are requested directly from 4chan while online.
-
-Neither the backend nor the PWA explicitly caches them. The browser may retain
-them through ordinary HTTP caching.
-
-Failures remain manually retryable without an application-imposed attempt limit.
-
-### Full media loading
-
-```mermaid
-flowchart TD
-    Thumbnail[Thumbnail or media reference] --> Action[User explicitly opens media]
-    Action --> Request[Request original media URL]
-    Request -->|success| Display[Display using native browser behavior]
-    Request -->|failure| Placeholder[Show unavailable or offline placeholder]
-    Placeholder --> Retry[User retries manually]
-    Retry --> Request
-```
-
-Full-size media is never loaded automatically.
-
-Images, video, audio and files are handled according to their original
-representation. 4Visor does not proxy, transform or persist them.
-
-Spoiler media remains hidden until explicitly revealed.
-
-### Local reset
-
-```mermaid
-flowchart TD
-    User[User selects Reset local data] --> Confirm[Confirm destructive local action]
-    Confirm --> DB[Delete IndexedDB databases]
-    DB --> Cache[Delete Service Worker application caches]
-    Cache --> Seed[Remove installation jitter seed]
-    Seed --> Reload[Reload application]
-```
-
-The reset action affects only the current browser installation.
-
-It removes:
-
-- active lineage;
-- incomplete incoming lineage;
-- installation-local jitter seed;
-- application shell caches.
-
-It performs no server-side operation.
-
-### Backend component failure
-
-```mermaid
-flowchart TD
-    Operation[Backend operation] --> Dependency{Required component available?}
-    Dependency -->|yes| Continue[Continue operation]
-    Dependency -->|no| Fail[Fail operation]
-```
-
-The failure principle is deliberately simple:
-
-> A required component fails, the operation fails.
-
-Examples:
-
-- Memcached unavailable: snapshot reads and lineage writes fail.
-- 4chan resolution or acquisition unavailable: affected acquisition work fails.
-- Ingress unavailable: client synchronization fails.
-- IndexedDB unavailable: the PWA fails.
-
-The system does not contain alternate caches, cross-instance failover
-coordination, fallback stores or hidden repair paths.
-
-The PWA's existing local lineage is the only meaningful client-side continuity
-mechanism.
-
-### Health check
-
-```mermaid
-flowchart TD
-    Probe[Health request] --> HTTP[Can backend reply?]
-    HTTP -->|no| Unhealthy[Unhealthy]
-    HTTP -->|yes| Cache[Can backend reach Memcached?]
-    Cache -->|no| Unhealthy
-    Cache -->|yes| DNS[Can backend resolve 4chan?]
-    DNS -->|no| Unhealthy
-    DNS -->|yes| Healthy[Healthy]
-```
-
-Health checking remains intentionally shallow.
-
-The health endpoint verifies:
-
-- backend responsiveness;
-- Memcached reachability;
-- 4chan DNS resolution.
-
-It does not validate:
-
-- lineage completeness;
-- current snapshot quality;
-- upstream HTTP success;
-- synchronization freshness beyond separately exported observability signals.
-
-### Trace flow for inbound requests
-
-```mermaid
-flowchart TD
-    Request[Inbound HTTP request] --> Root[HTTP server root span]
-    Root --> Pointer[Memcached active-pointer span]
-    Root --> Metadata[Memcached metadata span]
-    Root --> Blocks[Memcached block-read spans]
-    Root --> Encode[Snapshot serialization span]
-    Root --> Response[HTTP response]
-```
-
-Routine request begin/end events are not logged.
-
-Errors:
-
-- are logged;
-- mark the relevant span as error;
-- propagate meaningful status to the root span when the request fails.
-
-### Trace flow for scheduled synchronization
-
-```mermaid
-flowchart TD
-    Trigger[Scheduler trigger] --> Root[Lineage synchronization root span]
-    Root --> Boards[Board acquisition spans]
-    Root --> Catalogs[Catalog acquisition spans]
-    Root --> Threads[Thread acquisition spans]
-    Root --> Cache[Memcached write spans]
-    Root --> Activate[Lineage activation span]
-    Root --> Evict[Previous-lineage eviction span]
-    Root --> Summary[Completion attributes and event]
-```
-
-The lineage ULID is attached to the synchronization trace.
-
-Individual outbound calls and Memcached operations are represented as child
-spans. This allows one degraded lineage to be inspected from its root trigger
-through every upstream and cache operation.
-
-### Telemetry export
-
-```mermaid
-flowchart TD
-    App[4Visor backend] --> Collector[OpenTelemetry Collector]
-    Collector --> Logs[Filter and export interesting logs]
-    Collector --> Metrics[Export minimal metrics]
-    Collector --> Tail[Tail-based trace sampling]
-    Tail -->|any span failed| All[Retain 100%]
-    Tail -->|fully successful| Ten[Retain approximately 10%]
-```
-
-Logs are exported for:
-
-- lineage start and completion;
-- lineage activation;
-- previous-lineage eviction;
-- excessive lineage degradation;
-- meaningful item counts;
-- outbound acquisition summaries;
-- errors of any kind.
-
-Routine successful inbound request lifecycle logs are not emitted.
-
-Metrics remain low-cardinality and avoid labels such as:
-
-- lineage ULID;
-- thread identifier;
-- full URL;
-- Memcached key;
-- client identity;
-- raw error message.
-
-## Deployment View
-
-```mermaid
-flowchart TB
-Internet-->Ingress[VPS Ingress<br/>TLS termination]
-Ingress-->|HTTP over 127.0.0.1|Edge[Caddy reverse proxy]
-subgraph DockerCompose
-Edge[Caddy reverse proxy]
-Frontend[Frontend Caddy]
-Backend[Go backend]
-Mem[(Memcached)]
-OTel[OpenTelemetry Collector]
-Edge-->|non-API requests|Frontend
-Edge-->|strip /api from /api/*|Backend
-Backend-->Mem
-Backend-->OTel
-end
-Backend-->|HTTPS|API[4chan API]
-OTel-->Obs[Metrics · Logs · Traces]
-```
-
-### Deployment philosophy
-
-4Visor uses a deliberately minimal deployment model.
-
-- VPS ingress terminates TLS.
-- A dedicated edge Caddy binds to `127.0.0.1` and is the only host-exposed
-  Compose service.
-- One internal frontend Caddy serves built assets.
-- One internal Go backend serves `GET /snapshot` and `GET /health` directly.
-- One Memcached instance and one OpenTelemetry Collector remain internal.
-
-The personal-grade deployment accepts single-service outages. The client's
-previously synchronized lineage provides continuity while server-side services
-are unavailable.
-
-### Backend
-
-```mermaid
-flowchart LR
-Scheduler-->Backend[Go backend]
-Backend-->Mem[(Local Memcached)]
-Backend-->API[4chan API]
-Backend-->OTel[OpenTelemetry]
-```
-
-The backend owns exactly one Memcached instance.
-
-### Container model
-
-```mermaid
-flowchart TB
-subgraph DockerCompose
-Edge[Caddy reverse proxy]
-Frontend[Frontend Caddy]
-Backend[Go backend container]
-Memcached[Memcached container]
-OTel[OpenTelemetry Collector]
-Edge-->Frontend
-Edge-->Backend
-Backend-->Memcached
-Backend-->OTel
-end
-```
-
-The edge Caddy is the only service with a host bind. The frontend, backend,
-Memcached and OpenTelemetry Collector are internal Compose services.
-
-Images built and maintained by 4Visor are distroless, run rootless and use a
-read-only filesystem. Third-party images are used according to their supported
-runtime model and are not rebuilt solely to adopt these controls.
-
-The Go application is configured exclusively through `FOURVISOR_` environment
-variables. Caddyfiles, Memcached arguments and OpenTelemetry Collector
-configuration use their native mechanisms.
-
-### Health model
-
-```mermaid
-flowchart TD
-Probe[GET /health]-->HTTP{Backend responds?}
-HTTP-->|No|Fail[Unhealthy]
-HTTP-->|Yes|Cache{Memcached reachable?}
-Cache-->|No|Fail
-Cache-->|Yes|DNS{4chan DNS resolves?}
-DNS-->|No|Fail
-DNS-->|Yes|Healthy[Healthy]
-```
-
-Health checks verify only backend responsiveness, Memcached reachability and
-4chan DNS resolution.
-
-### Traffic
-
-```mermaid
-flowchart LR
-PWA-->Ingress[VPS ingress]
-Ingress-->|127.0.0.1|Edge[Caddy reverse proxy]
-Edge-->|non-API requests|Frontend[Frontend Caddy]
-Edge-->|strip /api from /api/*|Backend[Go backend]
-Backend-->Mem[(Memcached)]
-PWA-->|direct media|Media[4chan media]
-```
-
-The backend serves only textual snapshots. Media is always requested directly by
-the browser.
-
-### Scheduling
-
-The backend selects a stable startup jitter between five and sixty seconds and
-then executes at the configured synchronization interval.
-
-### Failure model
-
-If a required component fails, the dependent operation fails. Optional
-supporting components, such as telemetry export, may fail without failing
-unrelated application operations.
-
-Examples:
-
-- Caddy reverse proxy unavailable → the application is unreachable.
-- Frontend unavailable → the application shell cannot be loaded.
-- Backend unavailable → snapshot synchronization fails.
-- Memcached unavailable → backend operations fail.
-- 4chan unavailable → a degraded lineage is constructed and activated.
-- OpenTelemetry unavailable → telemetry export fails while request processing
-  continues.
-
-### Security
-
-- TLS terminated by ingress.
-- The VPS ingress reaches the edge Caddy only through `127.0.0.1`.
-- Frontend, backend, Memcached and observability services have no host exposure.
-- Memcached is reachable only by the backend on the internal Compose network.
-- Project-built images run rootless with read-only filesystems.
-- Enterprise-grade redundancy and hardening are outside the personal-grade
-  project scope.
-
-### Observability
-
-The backend exports application metrics, logs and traces to the OpenTelemetry
-Collector. Caddy and third-party container stdout logs are not required to pass
-through OpenTelemetry.
-
-The collector performs log collection, metric export and tail-based trace
-sampling.
-
-Successful traces are sampled; failed traces are retained in full.
-
-## Design Notes
-
-> 4Visor deliberately accepts stale data, missing data and degraded snapshots in
-> exchange for deterministic behavior, operational simplicity and a complete
-> absence of hidden synchronization logic.
-
-### Snapshot-first architecture
-
-4Visor is fundamentally a snapshot reader rather than an API client.
-
-The backend periodically observes 4chan and constructs an immutable lineage. The
-PWA consumes that lineage as a complete unit and renders exclusively from local
-storage.
-
-This avoids synchronization races, partially updated views and client-driven
-cache expansion.
-
-The application either presents one complete snapshot or another. It never
-presents an intermediate state.
-
-### Client-first design
-
-The browser is the primary serving layer.
-
-Once synchronized, the PWA serves all boards, catalogs and threads from
-IndexedDB without requiring backend interaction. Backend availability only
-matters during synchronization.
-
-This improves perceived responsiveness while naturally supporting offline
-reading of textual content.
-
-### Immutable lineages
-
-Each synchronization starts from scratch.
-
-Resources are evaluated only against the current upstream responses and cache
-rules.
-
-If a previously cached thread becomes oversized or disappears, the new lineage
-reflects that change directly. Historical cacheability is intentionally ignored.
-
-The active lineage changes only after the replacement has been fully
-constructed.
-
-### No incremental synchronization
-
-4Visor deliberately avoids incremental updates.
-
-Although differential synchronization would reduce transferred bytes, it
-introduces lineage reconciliation, partial failure handling and client-side
-merge logic.
-
-A complete lineage replacement keeps both the client and backend deterministic.
-
-### Single backend
-
-The personal-grade deployment uses one backend and one Memcached instance. It
-does not add server-side redundancy or coordination. When either service is
-unavailable, clients retain their previously synchronized local lineage.
-
-### Memcached as a serving cache
-
-Memcached is intentionally treated as an ephemeral serving layer.
-
-The active lineage pointer defines the visible snapshot.
-
-Lineage keys are written before activation and removed immediately after
-replacement. TTL exists only as cleanup insurance.
-
-The system never relies on Memcached for durable storage.
-
-### Upstream fidelity
-
-4Visor does not reinterpret 4chan.
-
-Ordering, board layout, catalogs, posts and original HTML are preserved exactly
-as observed.
-
-The backend may add cache metadata such as failed or oversize status but does
-not alter upstream semantics.
-
-### Binary exclusion
-
-Only textual resources are cached.
-
-Images, thumbnails, video and downloadable files remain direct browser requests
-to their original locations.
-
-This dramatically reduces backend storage requirements while keeping the browser
-responsible for ordinary HTTP caching.
-
-### Honest degradation
-
-Failures are visible rather than hidden.
-
-Failed boards, failed threads and oversized threads remain present in the
-interface with clear degraded presentation.
-
-Likewise, degraded lineages continue to activate while generating prominent
-telemetry.
-
-The objective is transparency rather than apparent completeness.
-
-### Browser platform first
-
-The frontend intentionally avoids large abstraction layers.
-
-Modern browser APIs already provide:
-
-- IndexedDB;
-- Service Workers;
-- Cache Storage;
-- ES modules;
-- History-independent navigation.
-
-Preact provides the narrow rendering and component abstraction. Browser APIs
-remain the direct source of persistence, networking, offline behavior and
-application lifecycle.
-
-### Trace-first observability
-
-Operational understanding comes primarily from traces.
-
-Scheduled synchronizations and inbound HTTP requests become root spans.
-
-Memcached operations, outbound 4chan requests and lineage lifecycle events
-become child spans.
-
-Logs complement traces by recording meaningful state transitions instead of
-routine request lifecycle messages.
-
-### Simplicity over flexibility
-
-Several common architectural patterns are intentionally excluded:
-
-- distributed cache coherence;
-- background repair queues;
-- client-driven cache warming;
-- resumable synchronization;
-- server-side personalization;
-- incremental lineage mutation.
-
-The resulting system is deliberately constrained.
-
-Those constraints reduce implementation complexity and make runtime behavior
-easier to understand and operate.
-
-## Detailed Observability
-
-### Philosophy
-
-4Visor is trace-first.
-
-Observability exists to explain system behavior rather than to maximize
-telemetry volume. Every exported signal should help answer an operational
-question.
-
-The system deliberately favors:
-
-- detailed traces;
-- few high-value metrics;
-- sparse, meaningful logs.
-
-Routine request lifecycle events are intentionally omitted.
-
-### OpenTelemetry
-
-OpenTelemetry is the only observability framework for the Go application.
-
-All Go application telemetry is exported to a central OpenTelemetry Collector.
-
-The collector is responsible for:
-
-- receiving OTLP telemetry;
-- tail-based trace sampling;
-- metric export;
-- log export.
-
-### Tracing
-
-Every inbound HTTP request creates a root span.
-
-Every scheduled lineage synchronization creates a root span.
-
-Representative synchronization trace:
-
-```text
-lineage.sync
-├── fetch.boards
-├── fetch.catalog
-├── fetch.thread
-├── memcached.write
-├── lineage.activate
-└── lineage.evict.previous
-```
-
-Representative request trace:
-
-```text
-http.server
-├── active-lineage.lookup
-├── memcached.read
-├── serialize.snapshot
-└── http.response
-```
-
-Child spans exist for:
-
-- outbound HTTP;
-- Memcached operations;
-- lineage lifecycle;
-- serialization;
-- validation.
-
-Useful span attributes include:
-
-- service.instance.id
-- lineage.id
-- resource.type
-- board
-- cache.operation
-- cache.hit
-- http.method
-- http.status_code
-- error.type
-
-High-cardinality values such as Memcached keys, raw URLs and thread identifiers
-should not become metric labels.
-
-### Metrics
-
-Metrics remain intentionally small.
-
-#### HTTP
-
-- server requests
-- server latency
-- client requests
-- client latency
-
-#### Cache
-
-- cache operations
-- cache hits
-- cache misses
-- cache errors
-- cache latency
-
-#### Lineages
-
-- synchronization duration
-- successful synchronizations
-- degraded synchronizations
-- failed resources
-- active lineage age
-
-Metrics describe system health rather than application content.
-
-### Logging
-
-Logs represent meaningful state transitions.
-
-Examples:
-
-- synchronization started
-- synchronization completed
-- lineage activated
-- previous lineage evicted
-- degraded lineage activated
-- outbound acquisition summary
-- oversized thread detected
-- cache cleanup
-
-Errors are always logged.
-
-Routine messages are intentionally excluded.
-
-Examples not logged:
-
-- inbound request started
-- inbound request completed
-- successful Memcached GET
-- successful outbound request
-- individual cache hit
-
-### Error handling
-
-Errors:
-
-- are logged;
-- mark the relevant span as failed;
-- propagate to parent spans where appropriate.
-
-When lineage degradation exceeds the configured tolerance:
-
-- the synchronization root span is marked as error;
-- a prominent structured log is emitted;
-- lineage.id and failure counts are attached as attributes.
-
-This allows locating the complete synchronization trace directly from the
-lineage identifier.
-
-### Sampling
-
-Tail-based sampling occurs in the OpenTelemetry Collector.
-
-Rules:
-
-- retain every trace containing an error;
-- retain approximately ten percent of fully successful traces.
-
-Sampling never occurs inside the application.
-
-### Deployment
-
-The backend exports OTLP directly to the collector.
-
-No local buffering or secondary observability stack is required.
-
-### Design principles
-
-- Trace first.
-- Metrics answer "how healthy?"
-- Logs answer "what meaningful event occurred?"
-- Traces answer "why?"
-- Emit less telemetry with higher diagnostic value.
-
-## Failure Semantics
-
-### Philosophy
-
-4Visor intentionally avoids recovery machinery.
-
-The system does not attempt automatic failover, background repair, on-demand
-cache reconstruction or transparent degradation. If a required component
-fails, the dependent operation fails.
-
-The primary continuity mechanism is the client's previously synchronized local
-lineage.
-
-### Backend component failures
-
-| Component               | Effect                                       | Recovery                              |
-| ----------------------- | -------------------------------------------- | ------------------------------------- |
-| Edge Caddy              | Application is unreachable                   | Existing local lineage remains usable |
-| Frontend Caddy          | Application shell requests fail              | Existing cached shell may remain usable |
-| Backend process         | Snapshot synchronization fails               | Existing local lineage remains usable |
-| Memcached               | Snapshot reads and lineage construction fail | Operation fails                       |
-| 4chan API               | Resource acquisition fails                   | Resource is marked `failed`           |
-| OpenTelemetry Collector | Telemetry export fails                       | Application continues                 |
-| Ingress                 | Client cannot synchronize                    | Existing local lineage remains usable |
-
-### Client failures
-
-| Failure                | Result                                                        |
-| ---------------------- | ------------------------------------------------------------- |
-| IndexedDB unavailable  | Application fails with a clear error                          |
-| IndexedDB corruption   | Application fails until local reset                           |
-| Storage quota exceeded | Synchronization stops; current lineage is retained            |
-| Network unavailable    | Current lineage continues serving                             |
-| Backend unavailable    | Synchronization fails; current lineage is retained            |
-| Schema mismatch        | Synchronization is rejected with an explicit deployment error |
-
-### Synchronization failures
-
-```mermaid
-flowchart TD
-    Sync[Synchronization starts]
-    Sync --> Failure{Failure?}
-    Failure -->|No| Activate[Activate new lineage]
-    Failure -->|Yes| Keep[Keep existing lineage]
-    Keep --> Retry[Retry at next scheduled interval]
-```
-
-A partially downloaded lineage is never activated.
-
-The client continues serving the previously active lineage until a future
-synchronization succeeds.
-
-### Lineage degradation
-
-Resource failures do not invalidate a lineage.
-
-Possible resource states:
-
-- present
-- failed
-- oversize
-- absent
-
-A lineage activates regardless of failed-resource count.
-
-If failures exceed the configured tolerance:
-
-- the lineage still activates;
-- the synchronization root span is marked as an error;
-- a structured error log is emitted;
-- the complete trace is retained by tail sampling.
-
-### Cache failures
-
-If the backend cannot retrieve every block belonging to the active lineage, it
-returns:
-
-```text
-HTTP 410 Gone
-```
-
-This represents an expired or unavailable snapshot rather than a missing
-upstream resource.
-
-### Media failures
-
-Media failures never affect textual snapshot availability.
-
-When media cannot be retrieved:
-
-- the offline placeholder is shown;
-- the user may retry manually;
-- no automatic retry occurs.
-
-### Upstream failures
-
-Transient failures (timeouts, network errors, rate limiting) may receive a
-bounded retry.
-
-Permanent or exhausted failures mark the affected resource as `failed`.
-
-Resources that have not completed acquisition when the configured lineage
-deadline expires are marked failed and excluded from further acquisition until
-the next lineage.
-
-### Failure matrix
-
-| Scenario                   | Visible outcome                                                 |
-| -------------------------- | --------------------------------------------------------------- |
-| Edge Caddy restart         | Service is temporarily unreachable                              |
-| Frontend Caddy restart     | Uncached application-shell requests temporarily fail            |
-| Backend restart            | Next synchronization may fail; local snapshot remains available |
-| Memcached loss             | Backend returns `410 Gone` until a new lineage is constructed   |
-| 4chan outage               | Degraded lineage containing failed resources                    |
-| Client offline             | Local snapshot remains fully readable                           |
-| Media offline              | Offline placeholder is displayed                                |
-| Oversize thread            | First 250 posts remain available                                |
-| Missing resource           | "Not available in this snapshot"                                |
-| Deployment schema mismatch | Explicit synchronization failure                                |
-
-### Summary
-
-| Failure                  | Client behavior                         | Backend behavior                    |
-| ------------------------ | --------------------------------------- | ----------------------------------- |
-| Synchronization failure  | Keep current lineage                    | Abort current synchronization       |
-| Upstream acquisition failure | Activate the degraded lineage         | Mark affected resources as `failed` |
-| Storage failure          | Keep current lineage                    | No change                           |
-| Backend unavailable      | Retry at next scheduled interval        | N/A                                 |
-| Media failure            | Show placeholder and allow manual retry | Not involved                        |
-
-### Operational principle
-
-> Fail fast, fail visibly, and preserve the last complete client snapshot
-> whenever possible.
-
-## Technology Stack
-
-> 4Visor deliberately uses a constrained technology stack. Each technology
-> exists because it directly supports the project's architectural principles of
-> simplicity, determinism and observability.
-
-### Backend
-
-- Go
-- Standard library `net/http`
-- Memcached
-- OpenTelemetry SDK
-- OTLP exporter
-
-### Frontend
-
-- Preact
-- Tailwind CSS
-- TypeScript
-- Native ES modules
-- Vite
-- Vitest
-- IndexedDB
-- Service Worker
-- Cache Storage API
-- Fetch API
-
-### Data formats
-
-- JSON
-- Brotli-compressed HTTP responses
-- HTML (stored exactly as received from 4chan)
-- ULID lineage identifiers
-
-### Infrastructure
-
-- Docker
-- Docker Compose
-- Caddy
-- Distroless project-built container images
-- Rootless project-built containers
-- Read-only filesystems for project-built containers
-
-### Networking
-
-- HTTPS
-- VPS ingress for TLS termination
-- VPS ingress for Brotli response compression
-- Dedicated Caddy reverse proxy bound to `127.0.0.1`
-- `/api/*` prefix stripping and proxying to the Go backend
-- Internal Docker Compose network for frontend and backend services
-- HTTP communication with the 4chan API
-
-### Observability
-
-- OpenTelemetry
-- OTLP
-- Tail-based sampling in the OpenTelemetry Collector
-- Structured logging
-- Metrics
-- Distributed traces
-
-### Testing
-
-- Vitest unit and integration tests
-- Go standard library unit and integration tests
-- No smoke, end-to-end or deployment tests
-
-### Browser platform
-
-- Progressive Web App
-- Web App Manifest
-- IndexedDB
-- Service Worker
-- Cache Storage
-- History API (used only for browser history, not application routing)
-
-### Operating systems
-
-Backend targets:
-
-- Linux amd64
-
-Client targets:
-
-- Chrome for Android 150 and newer
-
-### Configuration
-
-Go application configuration is supplied exclusively through environment
-variables prefixed:
-
-```text
-FOURVISOR_
-```
-
-### Deliberate exclusions
-
-The technology stack intentionally excludes:
-
-- React
-- Vue
-- Angular
-- Redux and similar state-management libraries
-- GraphQL
-- Relational databases
-- Document databases
-- Kubernetes
-- Message queues
-- Distributed caches
-- Workflow engines
-- Server-side rendering
-
-## Technology Rationale
-
-### Philosophy
-
-4Visor deliberately prefers mature, lightweight and system-oriented technologies
-over comprehensive frameworks.
-
-It is a personal-grade project. Technology choices target straightforward
-operation for one deployment rather than enterprise-grade redundancy or
-hardening.
-
-Every selected technology exists because it directly supports one of the
-project's architectural principles:
-
-- deterministic snapshots;
-- operational simplicity;
-- minimal deployment;
-- straightforward observability;
-- low runtime overhead.
-
-Technology choices are conservative rather than fashionable.
-
-### Go
-
-Go is the primary implementation language for the backend.
-
-Reasons:
-
-- simple concurrency model;
-- fast startup;
-- low memory footprint;
-- excellent HTTP support;
-- straightforward static binaries;
-- mature OpenTelemetry ecosystem;
-- natural fit for long-running services.
-
-The backend coordinates acquisition, lineage construction and snapshot serving.
-It does not require a large application framework.
-
-### Memcached
-
-Memcached is used as an ephemeral serving cache.
-
-Reasons:
-
-- extremely small operational footprint;
-- high read throughput;
-- simple deployment;
-- sufficient key/value semantics;
-- disposable state.
-
-The architecture intentionally avoids treating Memcached as a database.
-
-Lineages are immutable key namespaces referenced through one active-lineage
-pointer. If the cache disappears, the next scheduled synchronization
-reconstructs it.
-
-More capable distributed key/value stores are intentionally avoided because the
-design rejects distributed coordination.
-
-### Preact
-
-The frontend uses Preact as a lightweight rendering and component abstraction.
-
-Reasons:
-
-- reduced bundle size;
-- minimal abstraction;
-- JSX without React's runtime complexity;
-- small enough that browser APIs remain the primary abstraction;
-- long-term maintainability.
-
-Larger frontend frameworks and general-purpose state-management abstractions are
-excluded unless measurable complexity justifies them.
-
-### Tailwind CSS
-
-Tailwind CSS provides the frontend styling layer through the Vite toolchain.
-
-Reasons:
-
-- utility-first styling without a runtime framework;
-- direct composition in Preact components;
-- first-party Vite integration.
-
-### Vite
-
-Vite provides development and build tooling.
-
-Reasons:
-
-- fast development cycle;
-- native ES module workflow;
-- minimal configuration;
-- excellent production output.
-
-Vite is infrastructure, not an application framework.
-
-### Vitest
-
-Vitest provides automated testing.
-
-Reasons:
-
-- native Vite integration;
-- focused frontend unit and integration testing;
-- minimal additional tooling.
-
-Testing focuses on synchronization, rendering, storage and cache behavior.
-Smoke, end-to-end and deployment tests are intentionally excluded.
-
-### IndexedDB
-
-IndexedDB stores the active lineage.
-
-Reasons:
-
-- browser-native persistence;
-- structured storage;
-- asynchronous API;
-- offline capability.
-
-Exactly one active lineage exists after synchronization completes.
-
-### Service Worker
-
-The Service Worker caches only the application shell.
-
-Reasons:
-
-- reliable offline startup;
-- separation between application assets and snapshot data;
-- predictable storage behavior.
-
-Snapshot data intentionally remains outside Cache Storage.
-
-### Docker Compose
-
-Docker Compose is the deployment model.
-
-Reasons:
-
-- minimal operational complexity;
-- easy local reproduction;
-- deterministic deployments;
-- no orchestration platform required.
-
-The project intentionally avoids Kubernetes and similar orchestration systems.
-
-### First-party container hardening
-
-Container images built and maintained by 4Visor are:
-
-- distroless;
-- rootless;
-- immutable through a read-only filesystem.
-
-Third-party images are used according to their supported runtime model. 4Visor
-does not rebuild or reconfigure them solely to impose these controls.
-
-Reasons:
-
-- reduced attack surface;
-- fewer unnecessary runtime components;
-- simpler security posture.
-
-### OpenTelemetry
-
-OpenTelemetry provides all Go application observability.
-
-Reasons:
-
-- vendor-neutral instrumentation;
-- unified metrics, logs and traces;
-- tail-based sampling support;
-- mature ecosystem.
-
-Observability is designed around traces first, metrics second and logs third.
-
-### Brotli-compressed JSON
-
-Snapshots are transferred as JSON over HTTP using Brotli compression supplied by
-the VPS ingress.
-
-Reasons:
-
-- support in Chrome for Android 150 and newer;
-- human-readable payloads;
-- no custom serialization;
-- simple debugging.
-
-Alternative binary formats remain future optimizations rather than initial
-requirements.
-
-### Deliberate omissions
-
-4Visor intentionally excludes:
-
-- React;
-- Vue;
-- Angular;
-- Redux-style state management;
-- GraphQL;
-- distributed caches;
-- leader election;
-- workflow engines;
-- background job systems;
-- relational databases;
-- object storage;
-- message queues.
-
-The objective is not to minimize the number of technologies, but to minimize the
-number of architectural concepts.
-
-Each omitted technology would solve problems that 4Visor intentionally chooses
-not to have.
-
-## Locked Decisions
-
-> The following decisions define the architecture of 4Visor. They are considered
-> foundational and should not be changed without reconsidering the project's
-> overall direction.
-
-### Product
-
-- 4Visor is a read-only 4chan reader.
-- 4Visor is a personal-grade project, not an enterprise-grade service.
-- The application is anonymous.
-- No user accounts exist.
-- No posting, replying or moderation is supported.
-- No search is provided.
-- No bookmarks are provided.
-- No read/unread tracking exists.
-- No personalization or preferences exist.
-- The application does not curate, rank or filter content.
-- Canonical URLs remain the original 4chan URLs.
-
-### Snapshot model
-
-- Every backend synchronization creates a new immutable lineage.
-- Every lineage is constructed independently.
-- Snapshot responses use the exact nested `schemaVersion: 1` contract.
-- Version 1 has no migration, adapter or compatibility window.
-- Clients always render one complete local lineage.
-- Snapshot replacement is atomic.
-- The backend is authoritative.
-- Clients never merge or reconcile lineages.
-
-### Backend cache
-
-- Every board is considered.
-- The first 250 catalog threads are cached exactly as returned.
-- Up to the first 250 posts per thread are cached.
-- Oversized threads are truncated and marked.
-- Images and binary files are never cached.
-- Original post HTML is stored unchanged.
-
-### Frontend
-
-- Preact is the frontend rendering and component framework.
-- Tailwind CSS is the styling system.
-- TypeScript is the frontend implementation language.
-- Vite.
-- Vitest.
-- Chrome for Android 150 and newer is the only supported browser target.
-- IndexedDB stores snapshot data.
-- Service Worker caches only the application shell.
-- No additional state-management framework.
-- No client-side router.
-- Responsive mobile-first layout.
-- Compact board rows.
-- Nested replies.
-- Collapsible posts.
-
-### Rendering
-
-- Upstream HTML is sanitized before rendering.
-- Unsupported markup becomes plain text.
-- External links remain clickable.
-- Quote links point to 4chan.
-- Failed and oversized resources remain visible.
-
-### Synchronization
-
-- Backend synchronization every four hours by default.
-- Stable installation-local client jitter.
-- Stable backend startup jitter.
-- Complete lineage download before activation.
-- Previous lineage retained until successful swap.
-- One active lineage retained after synchronization.
-
-### Backend
-
-- Go implementation.
-- Memcached as ephemeral serving cache.
-- One backend and one Memcached instance.
-- Docker Compose deployment.
-- A dedicated edge Caddy is the only host-exposed service and binds to
-  `127.0.0.1`.
-- The frontend Caddy and Go backend are separate internal services.
-- The edge Caddy strips `/api` from `/api/*` before proxying to the Go backend;
-  non-API requests go to the frontend Caddy.
-- Browser `GET /api/snapshot` maps to backend `GET /snapshot`; browser
-  `GET /api/health` maps to backend `GET /health`.
-- The VPS ingress alone owns Brotli response compression.
-- Project-built images are distroless, run rootless and use read-only
-  filesystems.
-- Third-party images are exempt from project-owned container hardening.
-- Linux amd64 is the only supported deployment architecture.
-- Go application configuration exclusively through `FOURVISOR_` environment
-  variables.
-- Caddyfiles, Memcached arguments and Collector configuration use native
-  mechanisms.
-
-### Testing
-
-- Automated tests are limited to unit and integration tests.
-- Smoke, end-to-end and deployment tests are excluded.
-
-### Upstream
-
-- Global outbound rate limiting.
-- Default outbound concurrency of 10.
-- Five-second request timeout.
-- Configurable lineage deadline, four hours by default.
-- Bounded retries only for transient failures.
-- User-Agent is `4Visor/<commit-hash-of-deployed-version>`.
-
-### Observability
-
-- OpenTelemetry only for Go application telemetry.
-- Caddy and third-party container stdout logs are outside the OpenTelemetry
-  contract.
-- Trace-first observability.
-- Minimal metrics.
-- Meaningful logs only.
-- Tail-based sampling.
-- All failed traces retained.
-- Approximately ten percent of successful traces retained.
+- **SNAP-08 — Version rejection.** A missing, malformed, or unsupported schema
+  version rejects the incoming lineage without changing the active lineage.
+  There is no implicit migration, adapter, or compatibility window.
+
+### Acquisition workload and scheduling
+
+- **ACQ-01 — Global request rate.** Let `I_request = 1 second`. Outbound 4chan
+  request starts are globally separated by at least `I_request` across all
+  resource classes, initial attempts, and retries.
+- **ACQ-02 — Attempts and retries.** Each request attempt has a five-second
+  timeout. A resource receives at most two transient retries with one- and
+  two-second backoff; a longer valid `Retry-After` takes precedence. Network
+  failures, timeouts, and rate limiting are transient; other HTTP failures are
+  terminal. Every retry remains subject to ACQ-01 and ACQ-04.
+- **ACQ-03 — Concurrency and identity.** Maximum outbound concurrency defaults
+  to 10. Upstream requests use HTTPS. The outbound User-Agent is
+  `4Visor/<commit-hash-of-deployed-version>`.
+- **ACQ-04 — Acquisition deadline.** A lineage acquisition has a configurable
+  maximum duration that defaults to four hours. Work unfinished when it expires
+  becomes aggregate deadline failure state as specified by OBS-05 and OBS-06.
+- **ACQ-05 — Workload formula.** For a representative successful full
+  acquisition, let `B` be the observed board count and `T` the selected thread
+  count. Required resources are `R = 1 + B + T`; total attempts are
+  `A = R + sum(resource retries)`, with the retry bound defined by ACQ-02. The
+  request-start floor is `max(A - 1, 0) × I_request`. Feasibility also accounts
+  for attempt latency and timeout occupancy under ACQ-03, retry eligibility
+  delays, valid `Retry-After` values, construction, validation, and publication.
+- **ACQ-06 — Calibration evidence.** Before changing acquisition defaults,
+  record at least two consecutive native full acquisitions on the deployment
+  architecture named by DEP-04, with elapsed time, serialized bytes, resource
+  counts, attempt counts, and bounded controlled-failure classes. An unknown
+  that can be measured is not replaced by an invented production constant.
+- **ACQ-07 — Supported budget.** The configured workload must complete the
+  representative full acquisition before ACQ-04 with explicit measured
+  headroom and without lineage-deadline failures.
+- **SCHED-01 — Backend cadence.** Backend synchronization is configurable and
+  its default interval equals the default ACQ-04 duration. Startup uses one
+  stable instance-local jitter between 5 and 60 seconds. Only one
+  synchronization runs at a time while the current lineage remains available.
+  At process startup, the backend emits one bounded, secret-free record of the
+  effective configured policy governed by ACQ-01–ACQ-04 and SCHED-01, subject to
+  OBS-03.
+- **SCHED-02 — Client cadence.** A browser checks for a replacement lineage
+  approximately once per hour using one stable installation-local jitter in
+  the same bounded range as SCHED-01. The browser seed is random, stored only in
+  IndexedDB, never derived from fingerprinting data, never sent to the backend,
+  and removed by local reset.
+
+### Backend cache and publication
+
+- **CACHE-01 — Cache role.** The Memcached instance required by DEP-01 is the
+  ephemeral backend serving cache, not a durable database. One active lineage
+  and one incoming lineage may coexist; the active pointer selects the visible
+  lineage.
+- **CACHE-02 — Block contract.** Let `L_block = 512 KiB` and
+  `L_item = 1 MiB`. Lineage blocks use `L_block`, remain below `L_item`, and
+  number `ceil(S / L_block)` for serialized lineage bytes `S`.
+- **CACHE-03 — Capacity formula.** Required cache capacity is
+  `active lineage bytes + incoming lineage bytes + metadata + operational
+  headroom`. The deployment allocates 2048 MiB and disables evictions so the
+  two lineages can coexist during publication.
+- **CACHE-04 — Representative snapshot.** The representative production
+  snapshot is the larger of the two most recent successful full acquisitions.
+  Cache, transfer, storage, and telemetry budgets are evaluated against its
+  independently recorded compressed wire bytes, uncompressed transport bytes,
+  cache bytes, IndexedDB bytes, and resource counts.
+- **CACHE-05 — Atomic publication.** All required blocks and completion metadata
+  are written and validated before the active pointer changes. Construction,
+  contract-validation, write, publication, or cancellation failure preserves
+  the current pointer. Cleanup of the previous namespace occurs only after a
+  successful switch.
+- **CACHE-06 — Cleanup lifetime.** Every lineage key has a TTL equal to twice
+  SCHED-01. TTL is cleanup insurance, not a substitute for CACHE-03 or the
+  normal cleanup in CACHE-05.
+
+### Snapshot transport and HTTP boundaries
+
+- **TRN-01 — Measured format decision.** Before backend publication, HTTP
+  serving, browser ingestion, or storage consumers commit to an encoding, one
+  early MADR and calibration must select the transfer format from measured
+  candidates such as Brotli-compressed JSON, a framed textual representation,
+  CBOR or MessagePack, and length-delimited Protobuf. The comparison covers
+  compressed and uncompressed bytes, backend encoding cost, Worker and window
+  peak memory, IndexedDB bytes, incremental validation, selected-record read
+  cost, opaque-field fidelity, schema evolution, browser support, and dependency
+  complexity. Simplicity or raw-format intuition alone is not evidence.
+- **TRN-02 — Streaming outcome.** The selected format is a versioned,
+  stream-decodable sequence of independently decodable frames rather than one
+  complete document or one complete binary message. Frames align with IndexedDB
+  lineage metadata, board, catalog, thread, and post records.
+- **TRN-03 — Completeness and integrity.** A header identifies the schema
+  version, lineage, expected record counts, and integrity contract. A terminal
+  frame permits verification of completeness and the final digest before
+  activation. Every frame and the complete lineage are validated against
+  SNAP-07 and SNAP-08.
+- **TRN-04 — Serving representation.** Backend publication stores or can emit
+  transport-ready frames. Snapshot serving streams them in stored order without
+  reconstructing a complete serialized snapshot or decoded lineage graph solely
+  to serve HTTP.
+- **TRN-05 — Compatibility evidence.** Backend and browser share one small
+  compatibility fixture set proving representative order and opaque data, plus
+  one schema mismatch and one truncated or integrity failure. Exhaustive frame
+  permutation suites are not required when they exercise the same boundary.
+- **TRN-06 — Whole-message prohibition.** Production lineage paths must not use
+  `response.text()`, `response.json()`, or an equivalent decoder that
+  materializes the complete serialized or decoded lineage before staging.
+- **HTTP-01 — Snapshot route.** Browser `GET /api/snapshot` maps through the
+  repository edge, which removes `/api`, to backend `GET /snapshot`. A missing
+  active pointer, incomplete metadata, or missing required block returns
+  `410 Gone`; no per-resource snapshot endpoint exists.
+- **HTTP-02 — Backend response duration.** The backend applies no fixed absolute
+  write deadline to a successful snapshot response and propagates request
+  cancellation while streaming.
+- **HTTP-03 — Proxy response duration.** The repository edge streams snapshot
+  responses without buffering the complete body or imposing a shorter response
+  timeout than HTTP-02.
+- **HTTP-04 — Ingress allowance.** The VPS ingress response allowance exceeds
+  `representative preparation time + representative transfer time + explicit
+  headroom` measured for CACHE-04.
+- **HTTP-05 — Compression ownership.** Snapshot compression is applied exactly
+  once as standard Brotli HTTP content encoding by the VPS ingress. The backend
+  and repository edge do not compress snapshot responses. Compression is
+  measured separately from the uncompressed representation.
+
+### Browser ingestion, storage, and reads
+
+- **INGEST-01 — Worker ownership.** One dedicated Web Worker owns snapshot
+  fetching, incremental decoding, contract validation, digest calculation, and
+  bounded-batch staging directly into an incoming IndexedDB lineage namespace.
+- **INGEST-02 — Window boundary.** Import communication with the window is
+  limited to synchronization commands, cancellation, bounded progress,
+  controlled failures, and activation metadata. The window never receives a
+  complete response body, serialized lineage, or decoded lineage graph. If
+  bytes cross the boundary, `ArrayBuffer` ownership is transferred rather than
+  cloned.
+- **INGEST-03 — Bounded memory.** Download, decode, validation, digest, and
+  staging working memory is bounded independently of total lineage size. Before
+  accepting the browser target, a CACHE-04 calibration records peak Worker and
+  window memory; this is one-off evidence, not a permanent browser smoke or
+  end-to-end suite.
+- **INGEST-04 — Failure preservation.** Cancellation, network failure, HTTP
+  failure, decode failure, schema failure, digest mismatch, transaction failure,
+  and quota exhaustion preserve the active lineage and discard the incoming
+  namespace.
+- **INGEST-05 — Atomic activation.** Only after all expected records and final
+  integrity metadata validate does one short IndexedDB transaction switch the
+  active-lineage pointer. Cleanup follows activation and cannot expose a partial
+  import.
+- **READ-01 — Bounded startup.** Startup loads only active-lineage metadata and
+  records required for the initial view.
+- **READ-02 — Bounded navigation.** Board, catalog, thread, and post records are
+  queried on demand from IndexedDB in stored order. No query, component state,
+  or Worker message reconstructs the complete active lineage in window memory.
+- **STORE-01 — Storage ownership.** IndexedDB is mandatory and exclusively owns
+  snapshot data, the active pointer, incoming namespaces, and the installation
+  jitter seed. Service Worker Cache Storage owns only the application shell and
+  static assets. IndexedDB unavailability or corruption produces a clear
+  mandatory-storage error until local reset; there is no in-memory or
+  online-only fallback. When no active lineage exists, the application shows an
+  empty state while SCHED-02 continues.
+- **STORE-02 — Local reset.** A confirmed Reset local data action removes
+  IndexedDB application data, Service Worker application caches, incomplete
+  imports, and the installation seed, then reloads the application. It performs
+  no server-side action.
+
+### Rendering and media
+
+- **UI-01 — Layout.** The interface is responsive and mobile-first. Catalogs use
+  compact rows, replies are visually nested, posts are collapsible, and the
+  active lineage identifier and age remain visible.
+- **UI-02 — Degraded presentation.** Failed, absent, and oversize resources
+  remain in their stored position with clear degraded presentation. Selecting
+  a missing resource does not trigger a backend fetch and offers the canonical
+  upstream URL where applicable.
+- **UI-03 — Safe markup.** The backend stores upstream post HTML unchanged. The
+  frontend parses it and applies a strict element and attribute allowlist before
+  insertion into the main document. Unsupported markup becomes plain text;
+  external links remain clickable and quote links use canonical upstream URLs.
+- **MEDIA-01 — Direct media.** Media bypasses the backend. Thumbnails load
+  automatically while online; full-resolution media loads only after explicit
+  user interaction; spoiler media remains hidden until revealed.
+- **MEDIA-02 — Media failure.** The application performs no explicit media
+  caching, proxying, transformation, transcoding, or automatic retry. Ordinary
+  browser HTTP caching is allowed. Unavailable media shows a fixed placeholder
+  and retry is user initiated.
 
 ### Failure semantics
 
-- A required component failure causes the dependent operation to fail.
-- Lineages activate even when degraded.
-- A total 4chan outage activates a lineage with `boards.state` set to `failed`
-  when construction and publication succeed.
-- Construction, validation, publication, cache-write and cancellation failures
-  preserve the current active lineage.
-- Degradation is surfaced through logs and traces.
-- The client preserves its last complete lineage whenever possible.
+- **FAIL-01 — Required dependencies.** When a required component is unavailable,
+  the dependent operation fails. There is no fallback cache, repair queue,
+  replay system, cross-instance coordination, or hidden reconstruction path.
+- **FAIL-02 — Degraded acquisition.** Resource acquisition failures become
+  SNAP-06 states and do not prevent activation when construction and publication
+  succeed. A board-list failure may activate a lineage whose board collection
+  is failed.
+- **FAIL-03 — Active-lineage preservation.** Construction, validation,
+  publication, cache-write, cancellation, client synchronization, and storage
+  failures preserve the last complete active lineage whenever one exists.
+- **FAIL-04 — Optional telemetry.** Telemetry export failure does not fail
+  unrelated acquisition, serving, or browser operations.
+- **FAIL-05 — Boundary errors.** Dependency boundaries distinguish invalid data
+  from unavailability, propagate cancellation, preserve underlying causes for
+  OBS-02 while exposing controlled error types, and keep diagnostics within
+  OBS-03.
+- **FAIL-06 — Excessive degradation.** A configurable failure tolerance affects
+  observability only. Exceeding it does not prevent activation; it marks the
+  synchronization root span as an error and emits one structured error record
+  with lineage correlation and bounded actual and tolerated counts.
 
-### Out of scope
+### Operational diagnosis and observability
 
-- Enterprise-grade availability and hardening.
-- Multi-browser support.
-- Linux arm64 deployments.
-- Smoke, end-to-end and deployment tests.
-- Distributed cache coherence.
-- Leader election.
-- Shared backend state.
-- Incremental synchronization.
-- Client-triggered backend acquisition.
-- Binary media caching.
-- Relational databases.
-- Workflow engines.
-- Message queues.
-- Kubernetes.
+- **OBS-01 — Trace roots.** Every scheduled synchronization and inbound HTTP
+  request creates a root trace. Child spans represent outbound requests,
+  Memcached operations, validation, lineage construction, publication,
+  activation, cleanup, serialization, and response streaming where applicable.
+- **OBS-02 — Diagnostic outcome.** For acquisition, publication, and
+  snapshot-serving failures, the Operator can determine the lineage correlation
+  identifier; resource class; queue, rate, concurrency, request, body, decode,
+  or retry stage; controlled error and cause types; bounded HTTP response status;
+  retry attempt and exhaustion; publication stage or snapshot component; and
+  resulting operation and HTTP outcome.
+- **OBS-03 — Diagnostic safety.** Diagnostics contain no board or thread
+  identifiers, raw URLs, response bodies, cache keys or values, credentials,
+  client identity, raw dependency error strings, or other unbounded fields.
+- **OBS-04 — Attempt warning.** Emit exactly one warning for every attempted
+  resource fetch that terminates after its retry policy. Successful attempts do
+  not emit routine lifecycle logs.
+- **OBS-05 — Aggregate failures.** Emit one aggregate terminal-failure record per
+  lineage and bounded failure tuple. Lineage completion records bounded counts
+  and outcome without expanding individual undispatched work.
+- **OBS-06 — Deadline cardinality.** Work not dispatched before ACQ-04 is
+  aggregate-only and is not reported as a fetch attempt.
+- **OBS-07 — Oversize severity.** Oversize resources are expected contract states
+  and emit debug events rather than warnings or errors.
+- **OBS-08 — Log behavior.** Local structured JSON stderr remains unfiltered.
+  Exported application logs include only specified lifecycle, warning, and error
+  records with allowlisted attributes; source ownership follows OBS-12.
+- **OBS-09 — Trace retention.** The retained trace set contains every complete
+  synchronization trace, every trace containing an error, and approximately 10%
+  of other fully successful traces. Collector sampling ownership follows
+  OBS-12.
+- **OBS-10 — Sampling duration.** The tail-sampling decision window governed by
+  OBS-12 must exceed `ACQ-04 + publication allowance`; it defaults to five hours
+  for the default acquisition budget.
+- **OBS-11 — Metric catalogue.** Metrics remain low-cardinality and limited to
+  inbound and outbound HTTP volume and latency, cache operations and latency,
+  cache hits, misses, and errors, lineage duration and outcome, failed-resource
+  counts, and active-lineage age. Metric labels exclude lineage identifiers and
+  every field forbidden by OBS-03.
+- **OBS-12 — Policy ownership.** Application source filtering owns secrets,
+  cardinality, normalization, and the event catalogue. The Collector owns OTLP
+  reception, routing, batching, exporter authentication, and trace sampling; it
+  does not duplicate application field allowlists as a second failsafe.
+- **OBS-13 — Telemetry scope.** OBS-12 applies to Go application telemetry.
+  Caddy and third-party container stdout logs are outside that contract.
 
-## Out of Scope
+### Process and dependency status
 
-> The following capabilities are intentionally excluded from 4Visor. They are
-> not planned features unless the project's scope changes materially.
+- **PROC-01 — No application status route.** 4Visor exposes no application
+  health or readiness endpoint and configures no Compose health check. Upstream
+  DNS and Memcached availability are operational state, not process liveness.
+  Process state, snapshot response status, logs, metrics, and traces provide
+  operational diagnosis.
 
-### User interaction
+### Deployment, security, and dependency ownership
 
-- Posting new threads.
-- Posting replies.
-- Deleting posts.
-- Reporting content.
-- Moderation features.
-- User accounts.
-- Authentication.
-- User profiles.
-- Reputation systems.
-- Voting or reactions.
-- Private messaging.
-- Notifications.
+- **DEP-01 — Deployment model.** Docker Compose runs one repository edge Caddy,
+  one frontend Caddy, one Go backend, one Memcached instance, and one
+  OpenTelemetry Collector. Only the repository edge has a host bind, explicitly
+  on `127.0.0.1`; other services remain internal.
+- **DEP-02 — Routing ownership.** VPS ingress terminates TLS and reaches the
+  repository edge over loopback. The edge owns `/api` prefix removal and routes
+  non-API requests to the frontend. The frontend Caddy owns built assets; the
+  Go backend owns HTTP application behavior.
+- **DEP-03 — First-party images.** Images built and maintained by 4Visor are
+  distroless, run rootless, and use read-only filesystems. Third-party images
+  use their supported runtime model and are not rebuilt solely to impose those
+  controls.
+- **DEP-04 — Platform targets.** Linux amd64 is the only supported deployment
+  architecture. Chrome for Android 150 and newer is the only supported browser
+  target.
+- **DEP-05 — Configuration ownership.** Go application configuration is supplied
+  exclusively through `FOURVISOR_` environment variables. Caddyfiles, Memcached
+  arguments, and Collector configuration use their native mechanisms. Production
+  limits and timeouts derive from identified requirements or calibration, never
+  guessed deployment defaults.
+- **DEP-06 — Frontend dependencies.** Preact is the only frontend framework;
+  Tailwind CSS is the styling system; TypeScript, Vite, and native ES modules are
+  used for implementation and builds; Vitest provides frontend tests. IndexedDB,
+  Fetch, Dedicated Worker, Service Worker, Cache Storage, and History APIs own
+  persistence, networking, ingestion, offline shell behavior, and browser
+  history directly; a Web App Manifest declares installation metadata. There is
+  no additional state-management framework or client-side router.
+- **DEP-07 — Backend dependencies.** The backend uses Go, standard library
+  `net/http`, Memcached, the OpenTelemetry SDK, and an OTLP exporter. It does not
+  introduce an application framework for behavior already owned by the standard
+  library.
+- **SEC-01 — Exposure boundary.** No application dependency is host-exposed
+  except DEP-01. Memcached is reachable only by the backend on the internal
+  network. TLS, safe markup, secret-free diagnostics, and first-party image
+  controls follow DEP-02, UI-03, OBS-03, and DEP-03 respectively.
 
-### Personalization
+### Validation and enforcement
 
-- User preferences.
-- Server-side settings.
-- Theme synchronization.
-- Read/unread tracking.
-- Bookmarks.
-- Saved threads.
-- Search.
-- Recommendation engines.
-- Trending algorithms.
-- Personalized feeds.
+- **TEST-01 — Test classes.** Automated tests are limited to unit and
+  integration tests. Smoke, end-to-end, browser end-to-end, and deployment tests
+  are not provided.
+- **TEST-02 — Unit boundary.** Unit tests start no external process.
+- **TEST-03 — Integration dependency ownership.** Integration tests may start
+  task-owned dependency containers using dependency-native container ports and
+  Docker-assigned host ports bound explicitly to the loopback address established
+  by DEP-01. They require no prestarted project stack, fixed shared Compose
+  project, or fixed shared host port.
+- **TEST-04 — Deployment boundary.** Automated tests do not start the complete
+  application deployment, exercise a browser end to end, or probe a deployed
+  service.
+- **TEST-05 — Build validation.** Native configuration rendering, image
+  building, and release-archive assembly are build validation rather than smoke
+  or deployment tests.
+- **TEST-06 — Native validation first.** A bespoke structural validator is added
+  only when the native parser, compiler, build, or configuration command cannot
+  prove a required invariant.
+- **TEST-07 — Proportional proof.** Test each behavior once at the lowest stable
+  boundary that proves it. Add cross-boundary integration coverage only for a
+  behavior that can still fail there, such as serialization compatibility,
+  dependency semantics, or framework wiring. Do not duplicate one assertion
+  across unit, integration, image, Compose, script, and documentation checks.
+- **TEST-08 — Negative paths.** Negative-path coverage is required for trust
+  boundaries, security rules, cancellation and concurrency, atomic replacement,
+  data-loss risks, and observed regressions—not for every branch or log call.
+- **TEST-09 — Log contracts.** Log prose is not an API. Test exact wording only
+  when it is itself a stable filtering or operator contract; otherwise prove
+  severity, event identity, required and forbidden fields, and cardinality with
+  one representative event per policy class.
+- **TEST-10 — Single enforcement owner.** Each filtering, validation, and
+  normalization policy has one authoritative enforcement layer. A second layer
+  is allowed only for a distinct trust boundary or independently specified
+  failure mode. Test volume, branch count, mutation survival, and assertion
+  count are not product goals; validation ends when acceptance criteria and
+  material regression risks are proved.
 
-### Snapshot behavior
+### Continuous integration and release
 
-- Incremental synchronization.
-- Partial lineage activation.
-- Client-side lineage merging.
-- Differential snapshot updates.
-- Client-triggered backend acquisition.
-- On-demand thread fetching.
-- Historical lineage browsing.
-- Snapshot version reconciliation.
+- **REL-01 — Continuous integration.** Every push to `main` runs all documented
+  backend and frontend validation tasks from a clean checkout.
+- **REL-02 — Release trigger and identity.** Releases are manually dispatched.
+  One release builds backend and frontend images for DEP-04 from the same exact
+  commit and publishes immutable commit-derived tags.
+- **REL-03 — Supply-chain evidence.** Published images include provenance and
+  SBOMs and receive registry attestations.
+- **REL-04 — Deployable archive.** The release produces an archive tied to the
+  same commit and containing production Compose, Caddy and Collector
+  configuration, an environment template, and the operator reference required
+  by DOC-03.
 
-### Backend architecture
+### Documentation ownership
 
-- Multiple backend replicas.
-- Shared cache between backend instances.
-- Distributed cache coherence.
-- Leader election.
-- Cluster coordination.
-- Workflow engines.
-- Background repair queues.
-- Automatic replay of failed work.
-- Guaranteed completion semantics.
-- Exactly-once processing.
+- **DOC-01 — Self-documenting code.** Production code explains itself through
+  precise names, cohesive modules, explicit types, ordinary control flow, and
+  small intention-revealing helpers.
+- **DOC-02 — Why-only comments.** When a non-obvious invariant or choice cannot
+  be expressed clearly in code, a concise inline comment explains the reason at
+  the constrained mechanism. File, module, function, and test comments are not
+  required merely for coverage.
+- **DOC-03 — Operator reference.** README is limited to project purpose,
+  expected environment variables and their defaults, purpose, secrecy, and
+  restart implications, plus non-obvious operator constraints such as HTTP-04
+  and HTTP-05. It does not teach standard Docker, Docker Compose, shell, Git, or
+  service-lifecycle commands and does not narrate implementation details.
+- **DOC-04 — Artifact authority.** SEED owns product and architecture
+  requirements. MADRs explain genuine choices left open here. Generated stories
+  own implementation acceptance criteria. SEED, MADRs, stories, TODO, and
+  traceability are specification or process artifacts rather than product
+  documentation.
+- **DOC-05 — No duplicate product manuals.** Do not generate separate Markdown
+  feature, developer, implementation, test, or architecture documentation.
+  Encode behavior in code and focused tests and use DOC-02 for remaining
+  non-obvious reasoning.
 
-### Data storage
+### Explicit exclusions
 
-- Relational databases.
-- Document databases.
-- Object storage.
-- Persistent backend state.
-- Binary media storage.
-- Image proxying.
-- Thumbnail generation.
-- Full-text indexes.
+- **SCOPE-01 — Synchronization exclusions.** Incremental or differential
+  synchronization, partial activation, client-side lineage merging, historical
+  lineage browsing, version reconciliation, client-triggered acquisition,
+  on-demand resource fetching, resumable transfer, and background repair are out
+  of scope.
+- **SCOPE-02 — Backend exclusions.** Multiple backend replicas, shared backend
+  state, distributed cache coherence, leader election, workflow engines,
+  message queues, GraphQL, relational or document databases, object storage,
+  guaranteed completion, and exactly-once processing are out of scope.
+- **SCOPE-03 — Media exclusions.** Backend media storage, proxying, thumbnail
+  generation, transcoding, optimization, and offline media persistence are out
+  of scope.
+- **SCOPE-04 — Frontend exclusions.** React, Vue, Angular, Redux-style state
+  management, server-side rendering, hydration, multi-page architecture, and
+  unsupported browsers are out of scope.
+- **SCOPE-05 — Deployment exclusions.** Linux arm64, Kubernetes, service mesh,
+  autoscaling, cross-region replication, distributed consensus, stateful
+  orchestration, and enterprise-grade availability are out of scope.
+- **SCOPE-06 — Observability exclusions.** Verbose request lifecycle logging,
+  high-cardinality metrics, audit logging, business analytics, behavior
+  tracking, and session replay are out of scope.
 
-### Media
+## High-level architecture
 
-- Backend media caching.
-- Offline media persistence.
-- Automatic media retries.
-- Media transcoding.
-- Image optimization.
-- Video streaming infrastructure.
+The following view explains the boundaries established by DEP-01, DEP-02,
+SNAP-02, STORE-01, and MEDIA-01.
 
-### Frontend
+```mermaid
+flowchart LR
+    Reader --> PWA
+    subgraph Browser
+        PWA --> Worker[Snapshot ingestion Worker]
+        Worker --> IDB[(IndexedDB)]
+        PWA --> Shell[(Service Worker shell cache)]
+        PWA --> Media[Upstream media]
+    end
+    PWA --> Ingress[VPS ingress]
+    Ingress --> Edge[Repository edge Caddy]
+    Edge --> Frontend[Frontend Caddy]
+    Edge --> Backend[Go backend]
+    Backend --> Cache[(Memcached)]
+    Backend --> API[4chan API]
+    Backend --> Collector[OpenTelemetry Collector]
+    Collector --> Signals[Logs, metrics, traces]
+```
 
-- React.
-- Vue.
-- Angular.
-- Redux-style state management.
-- Browsers other than Chrome for Android 150 and newer.
-- Multi-browser compatibility.
-- Client-side routing.
-- SSR or hydration.
-- Multi-page application architecture.
+The browser is the primary serving layer after synchronization. Backend
+availability matters when obtaining a replacement lineage, while the last
+complete local lineage provides continuity. The backend remains authoritative
+for which lineage is transferred; browser and backend never reconcile partial
+state (SNAP-01, SNAP-02, FAIL-03).
 
-### Testing
+## Operational model
 
-- Smoke tests.
-- End-to-end tests.
-- Deployment tests.
+### Backend synchronization and publication
 
-### Deployment
+```mermaid
+flowchart TD
+    Schedule --> Acquire[Acquire ordered resources]
+    Acquire --> Classify[Classify resource outcomes]
+    Classify --> Frame[Build transport-ready records]
+    Frame --> Stage[Write incoming cache namespace]
+    Stage --> Verify[Validate metadata and completeness]
+    Verify --> Activate[Switch active pointer]
+    Activate --> Cleanup[Clean previous namespace]
+```
 
-- Linux arm64.
-- Enterprise-grade availability and hardening.
-- Kubernetes.
-- Service mesh.
-- Autoscaling.
-- Cross-region replication.
-- Distributed consensus.
-- Stateful orchestration.
-- Complex readiness or liveness orchestration.
+Acquisition is governed as one quantitative system rather than as unrelated
+timeouts and limits: request volume flows through ACQ-01–ACQ-07 into SCHED-01;
+serialized volume flows through CACHE-02–CACHE-04 into publication. The current
+lineage remains serviceable throughout construction (CACHE-05).
 
-### Observability
+### Snapshot serving and ingestion
 
-- Verbose request lifecycle logging.
-- High-cardinality metrics.
-- Audit logging.
-- Business analytics.
-- User behavior tracking.
-- Session replay.
+```mermaid
+flowchart LR
+    Cache[(Transport-ready cache blocks)] --> Backend[Streaming snapshot handler]
+    Backend --> Edge[Streaming repository edge]
+    Edge --> Ingress[Ingress-owned encoding]
+    Ingress --> Worker[Incremental Worker decoder]
+    Worker --> Incoming[(Incoming IndexedDB namespace)]
+    Incoming --> Verify[Completeness and integrity]
+    Verify --> Pointer[Atomic active pointer]
+```
 
-### Product philosophy
+TRN-01 makes the concrete encoding a measured decision, while TRN-02–TRN-06
+lock the interoperable streaming outcomes. HTTP-02–HTTP-05 ensure that a
+representative snapshot can traverse every server boundary without acquiring a
+smaller downstream budget or a second compression owner. INGEST-01–INGEST-05
+continue the same framed contract into storage without routing the full lineage
+through the window.
 
-4Visor intentionally does not attempt to become:
+### Browser startup and navigation
 
-- a replacement for 4chan;
-- a social platform;
-- a discussion platform;
-- a moderation tool;
-- a content archive;
-- a search engine;
-- a synchronization platform;
-- a general-purpose cache;
-- a distributed system showcase.
+```mermaid
+flowchart TD
+    Start --> Open[Open IndexedDB]
+    Open --> Metadata[Load active metadata]
+    Metadata --> Initial[Query initial records]
+    Initial --> Render[Render current view]
+    Render --> Select[Reader selects a board or thread]
+    Select --> Query[Query bounded ordered records]
+    Query --> Render
+```
 
-Its sole purpose is to present scheduled, immutable snapshots of 4chan through a
-lightweight Progressive Web App while remaining operationally simple.
+The import path is not considered bounded if startup or navigation later
+reconstructs the lineage. READ-01 and READ-02 therefore extend the memory
+boundary through ordinary browsing.
+
+### Failure and diagnosis
+
+Resource degradation is valid snapshot content, whereas construction,
+publication, import, and activation failures preserve the last complete
+lineage. FAIL-01–FAIL-04 define operation outcomes; OBS-02–OBS-12 define how an
+Operator distinguishes their causes without secrets or unbounded fields.
+
+Trace retention follows operational questions. Synchronizations remain
+inspectable as complete operations, error traces remain available for failure
+analysis, and unrelated successful traffic is sampled according to OBS-09.
+
+## Design rationale
+
+### Snapshot-first and client-first
+
+A complete immutable lineage avoids reconciliation races and partially updated
+views. Local IndexedDB reads make backend availability irrelevant to ordinary
+browsing after synchronization. These benefits depend on SNAP-01, SNAP-02,
+INGEST-05, READ-01, and READ-02 being enforced together.
+
+### Memcached as a serving cache
+
+Memcached is disposable serving state rather than history or durable storage.
+Atomic namespaces and a pointer provide the needed publication behavior; the
+capacity relationship in CACHE-03 is what makes that design feasible while a
+replacement is built.
+
+### Stream and storage alignment
+
+Moving whole-document parsing into a Worker would only move the memory spike.
+The transport, Worker, and IndexedDB shapes therefore share record boundaries
+under TRN-02 and INGEST-01. Format selection remains open only until TRN-01 has
+production-size evidence; downstream consumers may not independently choose
+incompatible representations.
+
+### Honest degradation
+
+Failures remain visible because hiding or repairing them would change the
+observed snapshot. SNAP-06 and FAIL-02 preserve upstream uncertainty without
+making degradation a publication failure.
+
+### Browser platform first
+
+The selected browser APIs already own networking, background ingestion,
+persistence, offline shell caching, and history. DEP-06 keeps Preact focused on
+rendering rather than wrapping those capabilities in speculative abstraction.
+
+### Trace-first operations
+
+Traces connect long-running synchronization work to its dependency operations.
+Sparse logs announce bounded meaningful events, and a small metric catalogue
+shows trends. OBS-04–OBS-12 keep those signals useful by defining cardinality,
+severity, retention, and ownership rather than merely requesting telemetry.
+
+### Deliberate simplicity
+
+The exclusions in SCOPE-01–SCOPE-06 prevent hidden repair, distributed
+coordination, and duplicate delivery paths. Simplicity does not relax the trust
+boundaries, atomic data replacement, accessibility basics, or bounded-resource
+requirements identified above.
